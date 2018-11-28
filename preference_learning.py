@@ -64,7 +64,7 @@ class Model(object):
         else:
             return tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,self.param_scope.name)
 
-    def train(self,D,batch_size=64,iter=10000,l2_reg=0.01,debug=False):
+    def train(self,D,batch_size=64,iter=10000,l2_reg=0.01,noise_level=0.1,debug=False):
         """
         Training will be early-terminate when validation accuracy becomes large enough..?
 
@@ -95,11 +95,11 @@ class Model(object):
             b_x,b_y,b_l = np.array(b_x),np.array(b_y),np.array(b_l)
 
             if add_noise:
-                b_l = (b_l + np.random.binomial(1,0.1,batch_size)) % 2 #Flip it with probability 0.1
+                b_l = (b_l + np.random.binomial(1,noise_level,batch_size)) % 2 #Flip it with probability 0.1
 
             return b_x,b_y,b_l
 
-        for it in tqdm(range(iter)):
+        for it in tqdm(range(iter),dynamic_ncols=True):
             b_x,b_y,b_l = _batch(train_idxes,add_noise=True)
             loss,l2_loss,acc,_ = sess.run([self.loss,self.l2_loss,self.acc,self.update_op],feed_dict={
                 self.x:b_x,
@@ -161,7 +161,7 @@ class GTDataset(object):
     def __init__(self,env):
         self.env = env
 
-    def gen_traj(self,agent):
+    def gen_traj(self,agent,min_length):
         obs, actions, rewards = [self.env.reset()], [], [0.]
         while True:
             action = agent.act(obs[-1], rewards[-1], False)
@@ -171,19 +171,23 @@ class GTDataset(object):
             actions.append(action)
             rewards.append(reward)
 
-            if done: break
+            if done:
+                if len(obs) < min_length:
+                    obs.append(self.env.reset())
+                    rewards.append(0.)
+                else:
+                    break
 
         return np.stack(obs,axis=0), np.array(actions), np.array(rewards)
 
-    def prebuilt(self,agents,num_trajs):
+    def prebuilt(self,agents,min_length):
+        assert len(agents)>0, 'no agent given'
         trajs = []
         for agent in tqdm(agents):
-            for _ in range(num_trajs):
-                traj = self.gen_traj(agent)
-                #print('model', agent.model_path, 'reward:',np.sum(traj[2]))
+            traj = self.gen_traj(agent,min_length)
 
-                trajs.append(traj)
-                tqdm.write('model: %s avg reward: %f'%(agent.model_path,np.mean([np.sum(traj[2]) for traj in trajs])))
+            trajs.append(traj)
+            tqdm.write('model: %s avg reward: %f'%(agent.model_path,np.sum(traj[2])))
         obs,actions,rewards = zip(*trajs)
         self.trajs = (np.concatenate(obs,axis=0),np.concatenate(rewards,axis=0))
 
@@ -202,6 +206,52 @@ class GTDataset(object):
                        0 if np.sum(rewards[x_ptr:x_ptr+steps]) > np.sum(rewards[y_ptr:y_ptr+steps]) else 1
                        ))
         return D
+
+class LearnerDataset(GTDataset):
+    def prebuilt(self,agents,min_length,num_traj=1):
+        assert len(agents)>0, 'no agent is given'
+
+        from collections import deque
+        rewards_queue = deque(maxlen=20)
+
+        trajs = []
+        for agent in tqdm(agents):
+            for _ in range(num_traj):
+                obs,actions,rewards = self.gen_traj(agent,min_length)
+                trajs.append((obs,rewards))
+
+                reward = np.sum(rewards)
+                rewards_queue.append(reward)
+
+                running_mean = np.mean(rewards_queue)
+                tqdm.write('model: %s avg reward: %f running mean: %f'%(agent.model_path,reward,running_mean))
+
+        self.trajs = trajs
+
+    def sample(self,num_samples,steps=40):
+        D = []
+        GT_preference = []
+        for _ in range(num_samples):
+            x_idx,y_idx = np.random.choice(len(self.trajs),2,replace=False)
+
+            x_ptr = np.random.randint(len(self.trajs[x_idx][0])-steps)
+            y_ptr = np.random.randint(len(self.trajs[y_idx][0])-steps)
+
+            D.append( (self.trajs[x_idx][0][x_ptr:x_ptr+steps],
+                       self.trajs[y_idx][0][y_ptr:y_ptr+steps],
+                       0 if x_idx > y_idx else 1
+                       ))
+            GT_preference.append(0 if np.sum(self.trajs[x_idx][1][x_ptr:x_ptr+steps]) > np.sum(self.trajs[y_idx][1][y_ptr:y_ptr+steps]) else 1)
+
+        print('------------------')
+        _,_,preference = zip(*D)
+        preference = np.array(preference).astype(np.bool)
+        GT_preference = np.array(GT_preference).astype(np.bool)
+        print('Quality of time-indexed preference (0-1):', np.count_nonzero(preference == GT_preference) / len(preference))
+        print('------------------')
+
+        return D
+
 
 def train(args):
     logdir = Path(args.logbase_path) / args.env_id
@@ -223,21 +273,41 @@ def train(args):
 
     models = sorted(Path(args.learners_path).glob('?????'))
     for i,path in enumerate(models):
-        agent = PPO2Agent(env,args.env_type,str(path))
+        # 1. Use only agents at its early learning stage. (intention picking!)
+        #if i < len(models)*0.5:
+        #    if i % 2 == 0 :
+        #        agent = PPO2Agent(env,args.env_type,str(path))
+        #        train_agents.append(agent)
+        #else:
+        #    break
 
-        if i < len(models)*0.5:
-            if i % 2 == 0 :
-                train_agents.append(agent)
-        else:
-            break
+        # 2. Use All Agents.
+        #agent = PPO2Agent(env,args.env_type,str(path))
+        #train_agents.append(agent)
 
-    gt_dataset = GTDataset(env)
-    gt_dataset.prebuilt(train_agents,1)
+        # 3. Use very early agent only
+        #if i < len(models)*0.25:
+        #    agent = PPO2Agent(env,args.env_type,str(path))
+        #    train_agents.append(agent)
+        #else:
+        #    break
+
+        # 4. Use agents in very differeng training regime.
+        if i % 4 == 0:
+            agent = PPO2Agent(env,args.env_type,str(path))
+            train_agents.append(agent)
+
+    if args.preference_type == 'gt':
+        dataset = GTDataset(env)
+    elif args.preference_type == 'time':
+        dataset = LearnerDataset(env)
+
+    dataset.prebuilt(train_agents,args.min_length)
 
     models = []
     for i in range(args.num_models):
         with tf.variable_scope('model_%d'%i):
-            models.append(Model(env.observation_space.shape[0]))
+            models.append(Model(env.observation_space.shape[0],steps=args.steps))
 
     ### Initialize Parameters
     init_op = tf.group(tf.global_variables_initializer(),
@@ -250,8 +320,8 @@ def train(args):
     sess.run(init_op)
 
     for i,model in enumerate(models):
-        D = gt_dataset.sample(args.D)
-        model.train(D,l2_reg=args.l2_reg,debug=True)
+        D = dataset.sample(args.D,args.steps)
+        model.train(D,l2_reg=args.l2_reg,noise_level=args.noise,debug=True)
 
         model.saver.save(sess,logdir+'/model_%d.ckpt'%(i),write_meta_graph=False)
 
@@ -274,17 +344,17 @@ def eval(args):
             test_agents.append(agent)
 
     gt_dataset= GTDataset(env)
-    gt_dataset.prebuilt(valid_agents,1)
-    D_valid = gt_dataset.sample(args.D)
+    gt_dataset.prebuilt(valid_agents,-1)
+    D_valid = gt_dataset.sample(args.D,args.steps)
 
     gt_dataset_test = GTDataset(env)
-    gt_dataset_test.prebuilt(test_agents,1)
-    D_test = gt_dataset_test.sample(args.D)
+    gt_dataset_test.prebuilt(test_agents,-1)
+    D_test = gt_dataset_test.sample(args.D,args.steps)
 
     models = []
     for i in range(args.num_models):
         with tf.variable_scope('model_%d'%i):
-            models.append(Model(env.observation_space.shape[0]))
+            models.append(Model(env.observation_space.shape[0],steps=args.steps))
 
     ### Initialize Parameters
     init_op = tf.group(tf.global_variables_initializer(),
@@ -330,11 +400,14 @@ if __name__ == "__main__":
     parser.add_argument('--env_id', default='', help='Select the environment to run')
     parser.add_argument('--env_type', default='', help='mujoco or atari')
     parser.add_argument('--learners_path', default='', help='path of learning agents')
+    parser.add_argument('--steps', default=40, type=int, help='length of snippets')
+    parser.add_argument('--min_length', default=-1,type=int, help='minimum length of trajectory generated by each agent')
     parser.add_argument('--num_models', default=3, type=int, help='number of models to ensemble')
     parser.add_argument('--l2_reg', default=0.01, type=float, help='l2 regularization size')
+    parser.add_argument('--noise', default=0.1, type=float, help='noise level to add on training label')
     parser.add_argument('--D', default=1000, type=int, help='|D| in the preference paper')
     parser.add_argument('--logbase_path', default='./log_preference/', help='path to log base (env_id will be concatenated at the end)')
-
+    parser.add_argument('--preference_type', help='gt or time; if gt then preference will be given as a GT reward, otherwise, it is given as a time index')
     parser.add_argument('--eval', action='store_true', help='path to log base (env_id will be concatenated at the end)')
     args = parser.parse_args()
 
