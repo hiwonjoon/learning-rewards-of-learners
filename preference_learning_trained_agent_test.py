@@ -52,7 +52,8 @@ def gen_traj(env,agent,reward_model,render=False):
 
         if render:
             env.render()
-    print(true_r,my_r)
+
+    print('last_x_loc', env.env.sim.data.qpos[0],'true r',true_r,'my r',my_r)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=None)
@@ -68,13 +69,13 @@ if __name__ == "__main__":
 
     reward_model = EnsembleModel(env,args.num_models,args.reward_model_path)
 
-    models = sorted(Path(args.agents_path).glob('?????'))
+    models = sorted(Path(args.agents_path).glob('?????'))[::-1]
     assert len(models) > 0, 'no agent is given'
 
     for i,path in enumerate(models):
         agent = PPO2Agent(env,args.env_type,str(path),stochastic=False)
 
         print(path)
-        gen_traj(env,agent,reward_model)
+        gen_traj(env,agent,reward_model,args.render)
 
 
