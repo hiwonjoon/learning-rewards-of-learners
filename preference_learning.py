@@ -178,11 +178,9 @@ class GTDataset(object):
         self.env = env
 
     def gen_traj(self,agent,min_length):
-        obs, actions, rewards = [], [], []
-
-        ob = self.env.reset()
+        obs, actions, rewards = [self.env.reset()], [], []
         while True:
-            action = agent.act(ob, None, None)
+            action = agent.act(obs[-1], None, None)
             ob, reward, done, _ = self.env.step(action)
 
             obs.append(ob)
@@ -191,8 +189,10 @@ class GTDataset(object):
 
             if done:
                 if len(obs) < min_length:
-                    ob = self.env.reset()
+                    obs.pop()
+                    obs.append(self.env.reset())
                 else:
+                    obs.pop()
                     break
 
         return np.stack(obs,axis=0), np.concatenate(actions,axis=0), np.array(rewards)
@@ -304,35 +304,36 @@ def train(args):
     for i,path in enumerate(models):
         # 1. Use only agents at its early learning stage. (intention picking!)
         #if i < len(models)*0.5:
-        #    agent = PPO2Agent(env,args.env_type,str(path))
+        #    print(path)
+        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
         #    train_agents.append(agent)
         #    #if i % 2 == 0 :
-        #    #    agent = PPO2Agent(env,args.env_type,str(path))
+        #    #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
         #    #    train_agents.append(agent)
         #else:
         #    break
 
         # 2. Use All Agents.
-        #agent = PPO2Agent(env,args.env_type,str(path))
+        #agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
         #train_agents.append(agent)
 
         # 3. Use very early agent only
         if i < len(models)*0.25:
             print(path)
-            agent = PPO2Agent(env,args.env_type,str(path))
+            agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
             train_agents.append(agent)
         else:
             break
 
         # 4. Use agents in very differeng training regime.
         #if i % 4 == 0:
-        #    agent = PPO2Agent(env,args.env_type,str(path))
+        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
         #    train_agents.append(agent)
 
         # 5. Very few...
         #if i < len(models)*0.125:
         #    print(path)
-        #    agent = PPO2Agent(env,args.env_type,str(path))
+        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
         #    train_agents.append(agent)
         #else:
         #    break
@@ -340,12 +341,10 @@ def train(args):
         # 6. Very Very few...
         #if i < len(models)*0.100:
         #    print(path)
-        #    agent = PPO2Agent(env,args.env_type,str(path))
+        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
         #    train_agents.append(agent)
         #else:
         #    break
-
-    return
 
     if args.preference_type == 'gt':
         dataset = GTDataset(env)
@@ -383,30 +382,65 @@ def eval(args):
     env = gym.make(args.env_id)
 
     valid_agents = []
-    test_agents = []
-
     models = sorted(Path(args.learners_path).glob('?????'))
     for i,path in enumerate(models):
-        agent = PPO2Agent(env,args.env_type,str(path))
+        # 1. Use only agents at its early learning stage. (intention picking!)
+        #if i < len(models)*0.5:
+        #    print(path)
+        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
+        #    valid_agents.append(agent)
+        #else:
+        #    break
 
-        if i < len(models)*0.5:
-            if i % 2 != 0 :
-                valid_agents.append(agent)
+        # 2. Use All Agents.
+        #agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
+        #valid_agents.append(agent)
+
+        # 3. Use very early agent only
+        #if i < len(models)*0.25:
+        #    print(path)
+        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
+        #    valid_agents.append(agent)
+        #else:
+        #    break
+
+        # 4. Use agents in very differeng training regime.
+        #if i % 4 == 0:
+        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
+        #    valid_agents.append(agent)
+
+        # 5. Very few...
+        #if i < len(models)*0.125:
+        #    print(path)
+        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
+        #    valid_agents.append(agent)
+        #else:
+        #    break
+
+        # 6. Very Very few...
+        if i < len(models)*0.100:
+            print(path)
+            agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
+            valid_agents.append(agent)
         else:
+            break
+
+    test_agents = []
+    for i,path in enumerate(models):
+        if i % 10 == 0:
+            agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
             test_agents.append(agent)
 
     gt_dataset= GTDataset(env)
     gt_dataset.prebuilt(valid_agents,-1)
-    D_valid = gt_dataset.sample(args.D,args.steps)
 
     gt_dataset_test = GTDataset(env)
     gt_dataset_test.prebuilt(test_agents,-1)
-    D_test = gt_dataset_test.sample(args.D,args.steps)
 
     models = []
     for i in range(args.num_models):
         with tf.variable_scope('model_%d'%i):
-            models.append(Model(env.observation_space.shape[0],steps=args.steps))
+            models.append(Model(args.include_action,env.observation_space.shape[0],env.action_space.shape[0],steps=args.steps))
 
     ### Initialize Parameters
     init_op = tf.group(tf.global_variables_initializer(),
@@ -422,13 +456,6 @@ def eval(args):
         model.saver.restore(sess,logdir+'/model_%d.ckpt'%(i))
 
         print('model %d'%i)
-
-        reward_sum, acc = model.eval(D_valid)
-        print('valid_dataset', np.mean(reward_sum),np.std(reward_sum),acc)
-
-        reward_sum, acc = model.eval(D_test)
-        print('test_datset', np.mean(reward_sum),np.std(reward_sum),acc)
-
         obs, acs, r = gt_dataset.trajs
         r_hat = model.get_reward(obs, acs)
 
@@ -443,7 +470,6 @@ def eval(args):
         plt.close(fig)
 
         np.savez('model_%d.npz'%i,r=r,r_hat=r_hat,r_test=r_test,r_hat_test=r_hat_test)
-
 
 
 if __name__ == "__main__":
@@ -462,6 +488,7 @@ if __name__ == "__main__":
     parser.add_argument('--preference_type', help='gt or time; if gt then preference will be given as a GT reward, otherwise, it is given as a time index')
     parser.add_argument('--min_margin', default=1, type=int, help='when prefernce type is "time", the minimum margin that we can assure there exist a margin')
     parser.add_argument('--include_action', action='store_true', help='whether to include action for the model or not')
+    parser.add_argument('--stochastic', action='store_true', help='whether want to use stochastic agent or not')
     parser.add_argument('--random_agent', action='store_true', help='whether to use default random agent')
     parser.add_argument('--eval', action='store_true', help='path to log base (env_id will be concatenated at the end)')
     args = parser.parse_args()
