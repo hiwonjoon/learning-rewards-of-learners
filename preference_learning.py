@@ -231,11 +231,9 @@ class GTDataset(object):
 
         return D
 
-class LearnerDataset(GTDataset):
-    def __init__(self,env,min_margin):
+class GTTrajLevelDataset(GTDataset):
+    def __init__(self,env):
         super().__init__(env)
-        self.min_margin = min_margin
-
 
     def prebuilt(self,agents,min_length):
         assert len(agents)>0, 'no agent is given'
@@ -246,6 +244,47 @@ class LearnerDataset(GTDataset):
             trajs.append((agent_idx,obs,actions,rewards))
 
         self.trajs = trajs
+        self.trajs_rank = np.argsort([np.sum(rewards) for _,_,_,rewards in self.trajs]) # rank 0 is the most bad demo.
+
+    def sample(self,num_samples,steps=40,include_action=False):
+        D = []
+        GT_preference = []
+        for _ in tqdm(range(num_samples)):
+            x_idx,y_idx = np.random.choice(len(self.trajs),2,replace=False)
+
+            x_traj = self.trajs[x_idx]
+            y_traj = self.trajs[y_idx]
+
+            x_ptr = np.random.randint(len(x_traj[1])-steps)
+            y_ptr = np.random.randint(len(y_traj[1])-steps)
+
+            if include_action:
+                D.append((np.concatenate((x_traj[1][x_ptr:x_ptr+steps],x_traj[2][x_ptr:x_ptr+steps]),axis=1),
+                          np.concatenate((y_traj[1][y_ptr:y_ptr+steps],y_traj[2][y_ptr:y_ptr+steps]),axis=1),
+                          0 if self.trajs_rank[x_idx] > self.trajs_rank[y_idx]  else 1)
+                        )
+            else:
+                D.append((x_traj[1][x_ptr:x_ptr+steps],
+                          y_traj[1][y_ptr:y_ptr+steps],
+                          0 if self.trajs_rank[x_idx] > self.trajs_rank[y_idx]  else 1)
+                        )
+
+            GT_preference.append(0 if np.sum(x_traj[3][x_ptr:x_ptr+steps]) > np.sum(y_traj[3][y_ptr:y_ptr+steps]) else 1)
+
+        print('------------------')
+        _,_,preference = zip(*D)
+        preference = np.array(preference).astype(np.bool)
+        GT_preference = np.array(GT_preference).astype(np.bool)
+        print('Quality of time-indexed preference (0-1):', np.count_nonzero(preference == GT_preference) / len(preference))
+        print('------------------')
+
+        return D
+
+
+class LearnerDataset(GTTrajLevelDataset):
+    def __init__(self,env,min_margin):
+        super().__init__(env)
+        self.min_margin = min_margin
 
     def sample(self,num_samples,steps=40,include_action=False):
         D = []
@@ -348,6 +387,8 @@ def train(args):
 
     if args.preference_type == 'gt':
         dataset = GTDataset(env)
+    elif args.preference_type == 'gt_traj':
+        dataset = GTTrajLevelDataset(env)
     elif args.preference_type == 'time':
         dataset = LearnerDataset(env,args.min_margin)
     else:
@@ -485,7 +526,7 @@ if __name__ == "__main__":
     parser.add_argument('--noise', default=0.1, type=float, help='noise level to add on training label')
     parser.add_argument('--D', default=1000, type=int, help='|D| in the preference paper')
     parser.add_argument('--logbase_path', default='./log_preference/', help='path to log base (env_id will be concatenated at the end)')
-    parser.add_argument('--preference_type', help='gt or time; if gt then preference will be given as a GT reward, otherwise, it is given as a time index')
+    parser.add_argument('--preference_type', help='gt or gt_traj or time; if gt then preference will be given as a GT reward, otherwise, it is given as a time index')
     parser.add_argument('--min_margin', default=1, type=int, help='when prefernce type is "time", the minimum margin that we can assure there exist a margin')
     parser.add_argument('--include_action', action='store_true', help='whether to include action for the model or not')
     parser.add_argument('--stochastic', action='store_true', help='whether want to use stochastic agent or not')
