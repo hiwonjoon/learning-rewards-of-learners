@@ -15,6 +15,14 @@ from siamese_ranker import PPO2Agent
 def gen_traj(env,agent,render=False,max_len=99999):
     ob = env.reset()
 
+    from mujoco_py.generated import const
+    unwrapped = env
+    while hasattr(unwrapped,'env'):
+        unwrapped = unwrapped.env
+    viewer = unwrapped._get_viewer('rgb_array')
+    viewer.cam.fixedcamid = 0
+    viewer.cam.type = const.CAMERA_FIXED
+
     for _ in range(max_len):
         a = agent.act(ob,None,None)
         ob, r, done, _ = env.step(a)
@@ -24,10 +32,7 @@ def gen_traj(env,agent,render=False,max_len=99999):
         if done:
             break
 
-    try:
-        return env.env.sim.data.qpos[0] #Final location of the object
-    except AttributeError:
-        return env.env.env.sim.data.qpos[0] #Final location of the object
+    return unwrapped.sim.data.qpos[0] #Final location of the object
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=None)

@@ -16,6 +16,7 @@ class RandomAgent(object):
     """The world's simplest agent!"""
     def __init__(self, action_space):
         self.action_space = action_space
+        self.model_path = 'random_agent'
 
     def act(self, observation, reward, done):
         return self.action_space.sample()[None]
@@ -324,66 +325,30 @@ class LearnerDataset(GTTrajLevelDataset):
 
 
 def train(args):
-    logdir = Path(args.logbase_path) / args.env_id
+    logdir = Path(args.log_dir)
+
     if logdir.exists() :
-        c = input('log is already exist. continue [Y/etc]? ')
+        c = input('log dir is already exist. continue to train a preference model? [Y/etc]? ')
         if c in ['YES','yes','Y']:
             import shutil
             shutil.rmtree(str(logdir))
         else:
             print('good bye')
-            exit()
+            return
+
     logdir.mkdir(parents=True)
+    with open(str(logdir/'args.txt'),'w') as f:
+        f.write( str(args) )
+
     logdir = str(logdir)
     env = gym.make(args.env_id)
 
     train_agents = [RandomAgent(env.action_space)] if args.random_agent else []
 
-    models = sorted(Path(args.learners_path).glob('?????'))
-    for i,path in enumerate(models):
-        # 1. Use only agents at its early learning stage. (intention picking!)
-        #if i < len(models)*0.5:
-        #    print(path)
-        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-        #    train_agents.append(agent)
-        #    #if i % 2 == 0 :
-        #    #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-        #    #    train_agents.append(agent)
-        #else:
-        #    break
-
-        # 2. Use All Agents.
-        #agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-        #train_agents.append(agent)
-
-        # 3. Use very early agent only
-        if i < len(models)*0.25:
-            print(path)
-            agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-            train_agents.append(agent)
-        else:
-            break
-
-        # 4. Use agents in very differeng training regime.
-        #if i % 4 == 0:
-        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-        #    train_agents.append(agent)
-
-        # 5. Very few...
-        #if i < len(models)*0.125:
-        #    print(path)
-        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-        #    train_agents.append(agent)
-        #else:
-        #    break
-
-        # 6. Very Very few...
-        #if i < len(models)*0.100:
-        #    print(path)
-        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-        #    train_agents.append(agent)
-        #else:
-        #    break
+    models = sorted([p for p in Path(args.learners_path).glob('?????') if int(p.name) <= args.max_chkpt])
+    for path in models:
+        agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
+        train_agents.append(agent)
 
     if args.preference_type == 'gt':
         dataset = GTDataset(env)
@@ -424,47 +389,11 @@ def eval(args):
 
     valid_agents = []
     models = sorted(Path(args.learners_path).glob('?????'))
-    for i,path in enumerate(models):
-        # 1. Use only agents at its early learning stage. (intention picking!)
-        #if i < len(models)*0.5:
-        #    print(path)
-        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-        #    valid_agents.append(agent)
-        #else:
-        #    break
-
-        # 2. Use All Agents.
-        #agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-        #valid_agents.append(agent)
-
-        # 3. Use very early agent only
-        #if i < len(models)*0.25:
-        #    print(path)
-        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-        #    valid_agents.append(agent)
-        #else:
-        #    break
-
-        # 4. Use agents in very differeng training regime.
-        #if i % 4 == 0:
-        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-        #    valid_agents.append(agent)
-
-        # 5. Very few...
-        #if i < len(models)*0.125:
-        #    print(path)
-        #    agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-        #    valid_agents.append(agent)
-        #else:
-        #    break
-
-        # 6. Very Very few...
-        if i < len(models)*0.100:
-            print(path)
-            agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-            valid_agents.append(agent)
-        else:
-            break
+    for path in models:
+        if path.name > args.max_chkpt:
+            continue
+        agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
+        valid_agents.append(agent)
 
     test_agents = []
     for i,path in enumerate(models):
@@ -519,22 +448,64 @@ if __name__ == "__main__":
     parser.add_argument('--env_id', default='', help='Select the environment to run')
     parser.add_argument('--env_type', default='', help='mujoco or atari')
     parser.add_argument('--learners_path', default='', help='path of learning agents')
+    parser.add_argument('--max_chkpt', default=240, type=int, help='decide upto what learner stage you want to give')
     parser.add_argument('--steps', default=40, type=int, help='length of snippets')
     parser.add_argument('--min_length', default=1000,type=int, help='minimum length of trajectory generated by each agent')
     parser.add_argument('--num_models', default=3, type=int, help='number of models to ensemble')
     parser.add_argument('--l2_reg', default=0.01, type=float, help='l2 regularization size')
     parser.add_argument('--noise', default=0.1, type=float, help='noise level to add on training label')
     parser.add_argument('--D', default=1000, type=int, help='|D| in the preference paper')
-    parser.add_argument('--logbase_path', default='./log_preference/', help='path to log base (env_id will be concatenated at the end)')
+    parser.add_argument('--log_dir', required=True)
     parser.add_argument('--preference_type', help='gt or gt_traj or time; if gt then preference will be given as a GT reward, otherwise, it is given as a time index')
     parser.add_argument('--min_margin', default=1, type=int, help='when prefernce type is "time", the minimum margin that we can assure there exist a margin')
     parser.add_argument('--include_action', action='store_true', help='whether to include action for the model or not')
     parser.add_argument('--stochastic', action='store_true', help='whether want to use stochastic agent or not')
     parser.add_argument('--random_agent', action='store_true', help='whether to use default random agent')
     parser.add_argument('--eval', action='store_true', help='path to log base (env_id will be concatenated at the end)')
+    # Args for PPO
+    parser.add_argument('--ppo_log_path', default='ppo2')
+    parser.add_argument('--custom_reward', required=True, help='preference or preference_normalized')
+    parser.add_argument('--ctrl_coeff', default=0.0, type=float)
+    parser.add_argument('--alive_bonus', default=0.0, type=float)
     args = parser.parse_args()
 
     if not args.eval :
+        # Train a Preference Model
         train(args)
+
+        # Train an agent
+        import os, subprocess
+        openai_logdir = Path(os.path.abspath(os.path.join(args.log_dir,args.ppo_log_path)))
+        if openai_logdir.exists():
+            print('openai_logdir is already exist.')
+            exit()
+
+        env = os.environ.copy()
+        env["OPENAI_LOG_FORMAT"] = 'stdout,log,csv,tensorboard'
+        env["OPENAI_LOGDIR"] = str(openai_logdir)
+
+        template = 'python -m baselines.run --alg=ppo2 --env={env} --num_timesteps=1e6 --save_interval=10 --custom_reward {custom_reward} --custom_reward_kwargs="{kwargs}"'
+        kwargs = {
+            "num_models":args.num_models,
+            "include_action":args.include_action,
+            "model_dir":os.path.abspath(args.log_dir),
+            "ctrl_coeff":args.ctrl_coeff,
+            "alive_bonus":args.alive_bonus
+        }
+
+        # Write down some log
+        openai_logdir.mkdir(parents=True)
+        with open(str(openai_logdir/'args.txt'),'w') as f:
+            f.write( args.custom_reward + '/')
+            f.write( str(kwargs) )
+
+        cmd = template.format(
+            env=args.env_id,
+            custom_reward=args.custom_reward,
+            kwargs=str(kwargs))
+
+        p = subprocess.Popen(cmd, cwd='./learner/baselines', stdout=subprocess.PIPE, env=env, shell=True)
+        for line in p.stdout:
+            print(line.decode(),end='')
     else:
         eval(args)
