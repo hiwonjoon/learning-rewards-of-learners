@@ -177,12 +177,19 @@ class Model(object):
 class GTDataset(object):
     def __init__(self,env):
         self.env = env
+        self.unwrapped = env
+        while hasattr(self.unwrapped,'env'):
+            self.unwrapped = self.unwrapped.env
 
     def gen_traj(self,agent,min_length):
+        max_x_pos = -99999
+
         obs, actions, rewards = [self.env.reset()], [], []
         while True:
             action = agent.act(obs[-1], None, None)
             ob, reward, done, _ = self.env.step(action)
+            if self.unwrapped.sim.data.qpos[0] > max_x_pos:
+                max_x_pos = self.unwrapped.sim.data.qpos[0]
 
             obs.append(ob)
             actions.append(action)
@@ -196,16 +203,16 @@ class GTDataset(object):
                     obs.pop()
                     break
 
-        return np.stack(obs,axis=0), np.concatenate(actions,axis=0), np.array(rewards)
+        return (np.stack(obs,axis=0), np.concatenate(actions,axis=0), np.array(rewards)), max_x_pos
 
     def prebuilt(self,agents,min_length):
         assert len(agents)>0, 'no agent given'
         trajs = []
         for agent in tqdm(agents):
-            traj = self.gen_traj(agent,min_length)
+            traj, max_x_pos = self.gen_traj(agent,min_length)
 
             trajs.append(traj)
-            tqdm.write('model: %s avg reward: %f'%(agent.model_path,np.sum(traj[2])))
+            tqdm.write('model: %s avg reward: %f max_x_pos: %f'%(agent.model_path,np.sum(traj[2]),max_x_pos))
         obs,actions,rewards = zip(*trajs)
         self.trajs = (np.concatenate(obs,axis=0),np.concatenate(actions,axis=0),np.concatenate(rewards,axis=0))
 
@@ -241,7 +248,7 @@ class GTTrajLevelDataset(GTDataset):
 
         trajs = []
         for agent_idx,agent in enumerate(tqdm(agents)):
-            obs,actions,rewards = self.gen_traj(agent,min_length)
+            (obs,actions,rewards),_ = self.gen_traj(agent,min_length)
             trajs.append((agent_idx,obs,actions,rewards))
 
         self.trajs = trajs
