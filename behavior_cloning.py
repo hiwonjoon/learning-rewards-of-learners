@@ -14,40 +14,50 @@ from siamese_ranker import PPO2Agent
 
 class Policy(object):
     def __init__(self,ob_dim,ac_dim,embedding_dims=512):
-        self.inp = tf.placeholder(tf.float32,[None,ob_dim])
-        self.l = tf.placeholder(tf.float32,[None,ac_dim])
-        self.l2_reg = tf.placeholder(tf.float32,[])
+        self.graph = tf.Graph()
+        self.sess = tf.Session(graph=self.graph)
 
-        with tf.variable_scope('weights') as param_scope:
-            self.fc1 = Linear('fc1',ob_dim,embedding_dims)
-            self.fc2 = Linear('fc2',embedding_dims,embedding_dims)
-            self.fc3 = Linear('fc3',embedding_dims,embedding_dims)
-            self.fc4 = Linear('fc4',embedding_dims,embedding_dims)
-            self.fc5 = Linear('fc5',embedding_dims,ac_dim)
+        with self.graph.as_default():
+            self.inp = tf.placeholder(tf.float32,[None,ob_dim])
+            self.l = tf.placeholder(tf.float32,[None,ac_dim])
+            self.l2_reg = tf.placeholder(tf.float32,[])
 
-        self.param_scope = param_scope
+            with tf.variable_scope('weights') as param_scope:
+                self.fc1 = Linear('fc1',ob_dim,embedding_dims)
+                self.fc2 = Linear('fc2',embedding_dims,embedding_dims)
+                self.fc3 = Linear('fc3',embedding_dims,embedding_dims)
+                self.fc4 = Linear('fc4',embedding_dims,embedding_dims)
+                self.fc5 = Linear('fc5',embedding_dims,ac_dim)
 
-        # build graph
-        def _policy(x):
-            _ = tf.nn.relu(self.fc1(x))
-            _ = tf.nn.relu(self.fc2(_))
-            _ = tf.nn.relu(self.fc3(_))
-            _ = tf.nn.relu(self.fc4(_))
-            r = self.fc5(_)
-            return r
+            self.param_scope = param_scope
 
-        self.ac = _policy(self.inp)
+            # build graph
+            def _policy(x):
+                _ = tf.nn.relu(self.fc1(x))
+                _ = tf.nn.relu(self.fc2(_))
+                _ = tf.nn.relu(self.fc3(_))
+                _ = tf.nn.relu(self.fc4(_))
+                r = self.fc5(_)
+                return r
 
-        loss = tf.reduce_sum((self.ac-self.l)**2,axis=1)
-        self.loss = tf.reduce_mean(loss,axis=0)
+            self.ac = _policy(self.inp)
 
-        weight_decay = tf.reduce_sum(self.fc1.w**2) + tf.reduce_sum(self.fc2.w**2) + tf.reduce_sum(self.fc3.w**2)
-        self.l2_loss = self.l2_reg * weight_decay
+            loss = tf.reduce_sum((self.ac-self.l)**2,axis=1)
+            self.loss = tf.reduce_mean(loss,axis=0)
 
-        self.optim = tf.train.AdamOptimizer(1e-4)
-        self.update_op = self.optim.minimize(self.loss+self.l2_loss,var_list=self.parameters(train=True))
+            weight_decay = tf.reduce_sum(self.fc1.w**2) + tf.reduce_sum(self.fc2.w**2) + tf.reduce_sum(self.fc3.w**2)
+            self.l2_loss = self.l2_reg * weight_decay
 
-        self.saver = tf.train.Saver(var_list=self.parameters(train=False),max_to_keep=0)
+            self.optim = tf.train.AdamOptimizer(1e-4)
+            self.update_op = self.optim.minimize(self.loss+self.l2_loss,var_list=self.parameters(train=True))
+
+            self.saver = tf.train.Saver(var_list=self.parameters(train=False),max_to_keep=0)
+
+            ################ Miscellaneous
+            self.init_op = tf.group(tf.global_variables_initializer(),
+                               tf.local_variables_initializer())
+
+        self.sess.run(self.init_op)
 
     def parameters(self,train=False):
         if train:
@@ -56,7 +66,7 @@ class Policy(object):
             return tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,self.param_scope.name)
 
     def train(self,D,batch_size=64,iter=20000,l2_reg=0.001,debug=False):
-        sess = tf.get_default_session()
+        sess = self.sess
 
         obs,acs,_ = D
 
@@ -82,18 +92,20 @@ class Policy(object):
 
         for it in tqdm(range(iter),dynamic_ncols=True):
             b_ob,b_ac = _batch(train_idxes)
-            loss,l2_loss,_ = sess.run([self.loss,self.l2_loss,self.update_op],feed_dict={
-                self.inp:b_ob,
-                self.l:b_ac,
-                self.l2_reg:l2_reg,
-            })
 
-            b_ob,b_ac = _batch(valid_idxes)
-            valid_loss= sess.run(self.loss,feed_dict={
-                self.inp:b_ob,
-                self.l:b_ac,
-                self.l2_reg:l2_reg,
-            })
+            with self.graph.as_default():
+                loss,l2_loss,_ = sess.run([self.loss,self.l2_loss,self.update_op],feed_dict={
+                    self.inp:b_ob,
+                    self.l:b_ac,
+                    self.l2_reg:l2_reg,
+                })
+
+                b_ob,b_ac = _batch(valid_idxes)
+                valid_loss= sess.run(self.loss,feed_dict={
+                    self.inp:b_ob,
+                    self.l:b_ac,
+                    self.l2_reg:l2_reg,
+                })
 
             if debug:
                 if it % 100 == 0 or it < 10:
@@ -105,9 +117,10 @@ class Policy(object):
             #    break
 
     def act(self, observation, reward, done):
-        sess = tf.get_default_session()
+        sess = self.sess
 
-        ac = sess.run(self.ac,feed_dict={self.inp:observation[None]})[0]
+        with self.graph.as_default():
+            ac = sess.run(self.ac,feed_dict={self.inp:observation[None]})[0]
 
         return ac
 
