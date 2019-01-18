@@ -470,6 +470,7 @@ if __name__ == "__main__":
     parser.add_argument('--random_agent', action='store_true', help='whether to use default random agent')
     parser.add_argument('--eval', action='store_true', help='path to log base (env_id will be concatenated at the end)')
     # Args for PPO
+    parser.add_argument('--rl_runs', default=1)
     parser.add_argument('--ppo_log_path', default='ppo2')
     parser.add_argument('--custom_reward', required=True, help='preference or preference_normalized')
     parser.add_argument('--ctrl_coeff', default=0.0, type=float)
@@ -489,7 +490,6 @@ if __name__ == "__main__":
 
         env = os.environ.copy()
         env["OPENAI_LOG_FORMAT"] = 'stdout,log,csv,tensorboard'
-        env["OPENAI_LOGDIR"] = str(openai_logdir)
 
         template = 'python -m baselines.run --alg=ppo2 --env={env} --num_timesteps=1e6 --save_interval=10 --custom_reward {custom_reward} --custom_reward_kwargs="{kwargs}"'
         kwargs = {
@@ -507,12 +507,23 @@ if __name__ == "__main__":
             f.write( str(kwargs) )
 
         cmd = template.format(
-            env=args.env_id,
             custom_reward=args.custom_reward,
             kwargs=str(kwargs))
 
-        p = subprocess.Popen(cmd, cwd='./learner/baselines', stdout=subprocess.PIPE, env=env, shell=True)
-        for line in p.stdout:
+        procs = []
+        for i in range(args.rl_runs):
+            env["OPENAI_LOG_DIR"] = str(openai_logdir/'run_%d'%i)
+            if i == 0:
+                p = subprocess.Popen(cmd, cwd='./learner/baselines', stdout=subprocess.PIPE, env=env, shell=True)
+            else:
+                p = subprocess.Popen(cmd, cwd='./learner/baselines', env=env, shell=True)
+            procs.append(p)
+
+        for line in procs[0].stdout:
             print(line.decode(),end='')
+
+        for p in procs[1:]:
+            p.wait()
+
     else:
         eval(args)
