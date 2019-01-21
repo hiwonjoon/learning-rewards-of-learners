@@ -581,4 +581,25 @@ if __name__ == "__main__":
             p.wait()
 
     else:
-        eval(args)
+        # eval(args)
+
+        import os
+        from performance_checker import gen_traj as get_x_pos
+
+        env = gym.make(args.env_id)
+
+        agents_dir = Path(os.path.abspath(os.path.join(args.log_dir,args.ppo_log_path)))
+        trained_steps = sorted(list(set([path.name for path in agents_dir.glob('run_*/checkpoints/?????')])))
+
+        print(str(agents_dir))
+        for step in trained_steps[::-1]:
+            perfs = []
+            for i in range(args.rl_runs):
+                path = str(agents_dir/('run_%d'%i)/'checkpoints'/step)
+                agent = PPO2Agent(env,args.env_type,path,stochastic=args.stochastic)
+                perfs += [
+                    get_x_pos(env,agent) for _ in range(5)
+                ]
+            print('[%s] %f %f %f %f'%(step,np.mean(perfs),np.std(perfs),np.max(perfs),np.min(perfs)))
+
+            #break
