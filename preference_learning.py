@@ -144,6 +144,24 @@ class Model(object):
             #    print('early termination@%08d'%it)
             #    break
 
+    def train_with_dataset(self,dataset,batch_size,include_action=False,iter=10000,l2_reg=0.01,debug=False):
+        sess = tf.get_default_session()
+
+        for it in tqdm(range(iter),dynamic_ncols=True):
+            b_x,b_y,x_split,y_split,b_l = dataset.batch(batch_size=batch_size,include_action=include_action)
+            loss,l2_loss,acc,_ = sess.run([self.loss,self.l2_loss,self.acc,self.update_op],feed_dict={
+                self.x:b_x,
+                self.y:b_y,
+                self.x_split:x_split,
+                self.y_split:y_split,
+                self.l:b_l,
+                self.l2_reg:l2_reg,
+            })
+
+            if debug:
+                if it % 100 == 0 or it < 10:
+                    tqdm.write(('loss: %f (l2_loss: %f), acc: %f'%(loss,l2_loss,acc)))
+
     def eval(self,D,batch_size=64):
         sess = tf.get_default_session()
 
@@ -368,6 +386,59 @@ class GTTrajLevelNoStepsDataset(GTTrajLevelDataset):
 
         return D
 
+class GTTrajLevelNoSteps_N_Mix_Dataset(GTTrajLevelNoStepsDataset):
+    def __init__(self,env,N,max_steps):
+        super().__init__(env,max_steps)
+
+        self.N = N
+        self.max_steps = max_steps
+
+    def sample(self,*kargs,**kwargs):
+        return None
+
+    def batch(self,batch_size,include_action):
+        #self.trajs = trajs
+        #self.trajs_rank = np.argsort([np.sum(rewards) for _,_,_,rewards in self.trajs]) # rank 0 is the most bad demo.
+        xs = []
+        ys = []
+
+        for _ in range(batch_size):
+            idxes = np.random.choice(len(self.trajs),2*self.N)
+
+            ranks = self.trajs_rank[idxes]
+            bad_idxes = [idxes[i] for i in np.argsort(ranks)[:self.N]]
+            good_idxes = [idxes[i] for i in np.argsort(ranks)[self.N:]]
+
+            def _pick_and_merge(idxes):
+                inp = []
+                for idx in idxes:
+                    obs, acs, rewards = self.trajs[idx][np.random.choice(len(self.trajs[idx]))]
+
+                    if len(obs) > self.max_steps:
+                        ptr = np.random.randint(len(obs)-self.max_steps)
+                        slc = slice(ptr,ptr+self.max_steps)
+                    else:
+                        slc = slice(len(obs))
+
+                    if include_action:
+                        inp.append(np.concatenate([obs[slc],acs[slc]],axis=1))
+                    else:
+                        inp.append(obs[slc])
+                return np.concatenate(inp,axis=0)
+
+            x = _pick_and_merge(bad_idxes)
+            y = _pick_and_merge(good_idxes)
+
+            xs.append(x)
+            ys.append(y)
+
+        x_split = np.array([len(x) for x in xs])
+        y_split = np.array([len(y) for y in ys])
+        xs = np.concatenate(xs,axis=0)
+        ys = np.concatenate(ys,axis=0)
+
+        return xs, ys, x_split, y_split, np.ones((batch_size,)).astype(np.int32)
+
 class LearnerDataset(GTTrajLevelDataset):
     def __init__(self,env,min_margin):
         super().__init__(env)
@@ -442,6 +513,8 @@ def train(args):
         dataset = GTTrajLevelDataset(env)
     elif args.preference_type == 'gt_traj_no_steps':
         dataset = GTTrajLevelNoStepsDataset(env,args.max_steps)
+    elif args.preference_type == 'gt_traj_no_steps_n_mix':
+        dataset = GTTrajLevelNoSteps_N_Mix_Dataset(env,args.N,args.max_steps)
     elif args.preference_type == 'time':
         dataset = LearnerDataset(env,args.min_margin)
     else:
@@ -466,7 +539,11 @@ def train(args):
 
     for i,model in enumerate(models):
         D = dataset.sample(args.D,args.steps,include_action=args.include_action)
-        model.train(D,l2_reg=args.l2_reg,noise_level=args.noise,debug=True)
+
+        if D is None:
+            model.train_with_dataset(dataset,64,include_action=args.include_action,debug=True)
+        else:
+            model.train(D,l2_reg=args.l2_reg,noise_level=args.noise,debug=True)
 
         model.saver.save(sess,logdir+'/model_%d.ckpt'%(i),write_meta_graph=False)
 
@@ -544,8 +621,9 @@ if __name__ == "__main__":
     parser.add_argument('--l2_reg', default=0.01, type=float, help='l2 regularization size')
     parser.add_argument('--noise', default=0.1, type=float, help='noise level to add on training label')
     parser.add_argument('--D', default=1000, type=int, help='|D| in the preference paper')
+    parser.add_argument('--N', default=10, type=int, help='number of trajactory mix (gt_traj_no_steps_n_mix only)')
     parser.add_argument('--log_dir', required=True)
-    parser.add_argument('--preference_type', help='gt or gt_traj or time or gt_traj_no_steps; if gt then preference will be given as a GT reward, otherwise, it is given as a time index')
+    parser.add_argument('--preference_type', help='gt or gt_traj or time or gt_traj_no_steps, gt_traj_no_steps_n_mix; if gt then preference will be given as a GT reward, otherwise, it is given as a time index')
     parser.add_argument('--min_margin', default=1, type=int, help='when prefernce type is "time", the minimum margin that we can assure there exist a margin')
     parser.add_argument('--include_action', action='store_true', help='whether to include action for the model or not')
     parser.add_argument('--stochastic', action='store_true', help='whether want to use stochastic agent or not')
