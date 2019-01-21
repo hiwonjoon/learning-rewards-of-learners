@@ -260,7 +260,10 @@ class GTTrajLevelDataset(GTDataset):
             trajs.append((agent_idx,obs,actions,rewards))
 
         self.trajs = trajs
-        self.trajs_rank = np.argsort([np.sum(rewards) for _,_,_,rewards in self.trajs]) # rank 0 is the most bad demo.
+
+        _idxes = np.argsort([np.sum(rewards) for _,_,_,rewards in self.trajs]) # rank 0 is the most bad demo.
+        self.trajs_rank = np.empty_like(_idxes)
+        self.trajs_rank[_idxes] = np.arange(len(_idxes))
 
     def sample(self,num_samples,steps=40,include_action=False):
         D = []
@@ -315,7 +318,10 @@ class GTTrajLevelNoStepsDataset(GTTrajLevelDataset):
         agent_rewards = [np.mean([np.sum(rewards) for _,_,rewards in agent_trajs]) for agent_trajs in trajs]
 
         self.trajs = trajs
-        self.trajs_rank = np.argsort(agent_rewards)
+
+        _idxes = np.argsort(agent_rewards) # rank 0 is the most bad demo.
+        self.trajs_rank = np.empty_like(_idxes)
+        self.trajs_rank[_idxes] = np.arange(len(_idxes))
 
     def sample(self,num_samples,steps=None,include_action=False):
         assert steps == None
