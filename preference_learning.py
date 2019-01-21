@@ -22,14 +22,16 @@ class RandomAgent(object):
         return self.action_space.sample()[None]
 
 class Model(object):
-    def __init__(self,include_action,ob_dim,ac_dim,embedding_dims=256,steps=None):
+    def __init__(self,include_action,ob_dim,ac_dim,batch_size=64,embedding_dims=256,steps=None):
         self.include_action = include_action
         in_dims = ob_dim+ac_dim if include_action else ob_dim
 
         self.inp = tf.placeholder(tf.float32,[None,in_dims])
-        self.x = tf.placeholder(tf.float32,[None,None,in_dims]) #[B,steps,in_dim]
-        self.y = tf.placeholder(tf.float32,[None,None,in_dims])
-        self.l = tf.placeholder(tf.int32,[None]) # [0 when x is better 1 when y is better]
+        self.x = tf.placeholder(tf.float32,[None,in_dims]) #[B*steps,in_dim]
+        self.y = tf.placeholder(tf.float32,[None,in_dims])
+        self.x_split = tf.placeholder(tf.int32,[batch_size]) # B-lengthed vector indicating the size of each steps
+        self.y_split = tf.placeholder(tf.int32,[batch_size]) # B-lengthed vector indicating the size of each steps
+        self.l = tf.placeholder(tf.int32,[batch_size]) # [0 when x is better 1 when y is better]
         self.l2_reg = tf.placeholder(tf.float32,[]) # [0 when x is better 1 when y is better]
 
 
@@ -49,22 +51,20 @@ class Model(object):
 
         self.r = _reward(self.inp)
 
-        B = tf.shape(self.x)[0]
+        rs_xs = _reward(self.x)
+        self.v_x = tf.stack([tf.reduce_sum(rs_x) for rs_x in tf.split(rs_xs,self.x_split,axis=0)],axis=0)
 
-        self.r_x = tf.reshape(_reward(tf.reshape(self.x,[-1,in_dims])),[B,-1])
-        self.sum_r_x = tf.reduce_sum(self.r_x,axis=1)
+        rs_ys = _reward(self.y)
+        self.v_y = tf.stack([tf.reduce_sum(rs_y) for rs_y in tf.split(rs_ys,self.y_split,axis=0)],axis=0)
 
-        self.r_y = tf.reshape(_reward(tf.reshape(self.y,[-1,in_dims])),[B,-1])
-        self.sum_r_y = tf.reduce_sum(self.r_y,axis=1)
-
-        logits = tf.stack([self.sum_r_x,self.sum_r_y],axis=1) #[None,2]
+        logits = tf.stack([self.v_x,self.v_y],axis=1) #[None,2]
         loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits,labels=self.l)
         self.loss = tf.reduce_mean(loss,axis=0)
 
         weight_decay = tf.reduce_sum(self.fc1.w**2) + tf.reduce_sum(self.fc2.w**2) + tf.reduce_sum(self.fc3.w**2)
         self.l2_loss = self.l2_reg * weight_decay
 
-        pred = tf.cast(tf.greater(self.sum_r_y,self.sum_r_x),tf.int32)
+        pred = tf.cast(tf.greater(self.v_y,self.v_x),tf.int32)
         self.acc = tf.reduce_mean(tf.cast(tf.equal(pred,self.l),tf.float32))
 
         self.optim = tf.train.AdamOptimizer(1e-4)
@@ -106,31 +106,37 @@ class Model(object):
                 batch.append(D[i])
 
             b_x,b_y,b_l = zip(*batch)
-            b_x,b_y,b_l = np.array(b_x),np.array(b_y),np.array(b_l)
+            x_split = np.array([len(x) for x in b_x])
+            y_split = np.array([len(y) for y in b_y])
+            b_x,b_y,b_l = np.concatenate(b_x,axis=0),np.concatenate(b_y,axis=0),np.array(b_l)
 
             if add_noise:
                 b_l = (b_l + np.random.binomial(1,noise_level,batch_size)) % 2 #Flip it with probability 0.1
 
-            return b_x,b_y,b_l
+            return b_x,b_y,x_split,y_split,b_l
 
         for it in tqdm(range(iter),dynamic_ncols=True):
-            b_x,b_y,b_l = _batch(train_idxes,add_noise=True)
+            b_x,b_y,x_split,y_split,b_l = _batch(train_idxes,add_noise=True)
+
             loss,l2_loss,acc,_ = sess.run([self.loss,self.l2_loss,self.acc,self.update_op],feed_dict={
                 self.x:b_x,
                 self.y:b_y,
+                self.x_split:x_split,
+                self.y_split:y_split,
                 self.l:b_l,
                 self.l2_reg:l2_reg,
             })
 
-            b_x,b_y,b_l = _batch(valid_idxes,add_noise=False)
-            valid_acc = sess.run(self.acc,feed_dict={
-                self.x:b_x,
-                self.y:b_y,
-                self.l:b_l
-            })
-
             if debug:
                 if it % 100 == 0 or it < 10:
+                    b_x,b_y,x_split,y_split,b_l = _batch(valid_idxes,add_noise=False)
+                    valid_acc = sess.run(self.acc,feed_dict={
+                        self.x:b_x,
+                        self.y:b_y,
+                        self.x_split:x_split,
+                        self.y_split:y_split,
+                        self.l:b_l
+                    })
                     tqdm.write(('loss: %f (l2_loss: %f), acc: %f, valid_acc: %f'%(loss,l2_loss,acc,valid_acc)))
 
             #if valid_acc >= 0.95:
@@ -295,6 +301,22 @@ class GTTrajLevelNoStepsDataset(GTTrajLevelDataset):
         super().__init__(env)
         self.max_steps = max_steps
 
+    def prebuilt(self,agents,min_length):
+        assert len(agents)>0, 'no agent is given'
+
+        trajs = []
+        for agent_idx,agent in enumerate(tqdm(agents)):
+            agent_trajs = []
+            while np.sum([len(obs) for obs,_,_ in agent_trajs])  < min_length:
+                (obs,actions,rewards),_ = self.gen_traj(agent,-1)
+                agent_trajs.append((obs,actions,rewards))
+            trajs.append(agent_trajs)
+
+        agent_rewards = [np.mean([np.sum(rewards) for _,_,rewards in agent_trajs]) for agent_trajs in trajs]
+
+        self.trajs = trajs
+        self.trajs_rank = np.argsort(agent_rewards)
+
     def sample(self,num_samples,steps=None,include_action=False):
         assert steps == None
 
@@ -303,33 +325,33 @@ class GTTrajLevelNoStepsDataset(GTTrajLevelDataset):
         for _ in tqdm(range(num_samples)):
             x_idx,y_idx = np.random.choice(len(self.trajs),2,replace=False)
 
-            x_traj = self.trajs[x_idx]
-            y_traj = self.trajs[y_idx]
+            x_traj = self.trajs[x_idx][np.random.choice(len(self.trajs[x_idx]))]
+            y_traj = self.trajs[y_idx][np.random.choice(len(self.trajs[y_idx]))]
 
-            if len(x_traj[1]) > self.max_steps:
-                ptr = np.random.randint(len(x_traj[1])-self.max_steps)
+            if len(x_traj[0]) > self.max_steps:
+                ptr = np.random.randint(len(x_traj[0])-self.max_steps)
                 x_slice = slice(ptr,ptr+self.max_steps)
             else:
                 x_slice = slice(len(x_traj[1]))
 
-            if len(y_traj[1]) > self.max_steps:
-                ptr = np.random.randint(len(y_traj[1])-self.max_steps)
+            if len(y_traj[0]) > self.max_steps:
+                ptr = np.random.randint(len(y_traj[0])-self.max_steps)
                 y_slice = slice(ptr,ptr+self.max_steps)
             else:
-                y_slice = slice(len(y_traj[1]))
+                y_slice = slice(len(y_traj[0]))
 
             if include_action:
-                D.append((np.concatenate((x_traj[1][x_slice],x_traj[2][x_slice]),axis=1),
-                          np.concatenate((y_traj[1][y_slice],y_traj[2][y_slice]),axis=1),
+                D.append((np.concatenate((x_traj[0][x_slice],x_traj[1][x_slice]),axis=1),
+                          np.concatenate((y_traj[0][y_slice],y_traj[1][y_slice]),axis=1),
                           0 if self.trajs_rank[x_idx] > self.trajs_rank[y_idx]  else 1)
                         )
             else:
-                D.append((x_traj[1][x_slice],
-                          y_traj[1][y_slice],
+                D.append((x_traj[0][x_slice],
+                          y_traj[0][y_slice],
                           0 if self.trajs_rank[x_idx] > self.trajs_rank[y_idx]  else 1)
                         )
 
-            GT_preference.append(0 if np.sum(x_traj[3][x_slice]) > np.sum(y_traj[3][y_slice]) else 1)
+            GT_preference.append(0 if np.sum(x_traj[2][x_slice]) > np.sum(y_traj[2][y_slice]) else 1)
 
         print('------------------')
         _,_,preference = zip(*D)
