@@ -344,16 +344,29 @@ def train(args):
             dataset = Dataset(env)
             dataset.prebuilt([RandomAgent(env.observation_space,env.action_space)],args.inv_min_length)
 
-            inv_model.train(dataset.trajs,iter=args.inv_min_length,debug=True)
+            inv_model.train(dataset.trajs,iter=args.inv_iter,debug=True)
             inv_model.save(logdir+'/inv_model.ckpt')
 
     ### Train Policy with Behavior Cloning
     agents = []
     if args.best_only:
-        agent = PPO2Agent(env,args.env_type,str(Path(args.learners_path)/('%05d'%600)),stochastic=args.stochastic)
+        if args.env_id == 'SeaquestNoFrameskip-v4':
+            best_demo = 60
+        elif args.env_id == 'EnduroNoFrameskip-v4':
+            best_demo = 3650
+        else:
+            best_demo = 600
+
+        agent = PPO2Agent(env,args.env_type,str(Path(args.learners_path)/('%05d'%best_demo)),stochastic=args.stochastic)
         agents.append(agent)
     else:
-        for i in range(50,601,50):
+        if args.env_id == 'SeaquestNoFrameskip-v4':
+            range_obj = range(5,61,5)
+        elif args.env_id == 'EnduroNoFrameskip-v4':
+            range_obj = range(3100,3651,50)
+        else:
+            range_obj = range(50,601,50)
+        for i in range_obj:
             agent = PPO2Agent(env,args.env_type,str(Path(args.learners_path)/('%05d'%i)),stochastic=args.stochastic)
             agents.append(agent)
 
@@ -402,7 +415,7 @@ if __name__ == "__main__":
     ### For BCO
     parser.add_argument('--pretrained_inv', default=None)
     parser.add_argument('--inv_min_length', default=100000,type=int, help='minimum length of trajectory to train inv_dynamis')
-    parser.add_argument('--inv_iter', default=20000,type=int, help='# sgd steps for inverse dynamcis learning')
+    parser.add_argument('--inv_iter', default=100000,type=int, help='# sgd steps for inverse dynamcis learning')
     ### For BC
     parser.add_argument('--learners_path', help='path of learning agents', required=True)
     parser.add_argument('--best_only', action='store_true', help='whether behavior clone only the best only or mix up all')
