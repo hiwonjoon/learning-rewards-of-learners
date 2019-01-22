@@ -405,6 +405,51 @@ def train(args):
 
     learner.save(logdir+'/bc_model_full')
 
+def eval(args):
+    match = {
+        'breakout' : 'BreakoutNoFrameskip-v4',
+        'pong' : 'PongNoFrameskip-v4',
+        'seaquest' : 'SeaquestNoFrameskip-v4',
+        'qbert' : 'QbertNoFrameskip-v4',
+        'enduro' : 'EnduroNoFrameskip-v4',
+        'hero' : 'HeroNoFrameskip-v4',
+        'beamrider' : 'BeamRiderNoFrameskip-v4',
+        'spaceinvaders' : 'SpaceInvadersNoFrameskip-v4',
+    }
+
+    logdir = Path('./log_bc')
+    stochastic = True
+    num_episode = 10
+
+    from baselines.common.cmd_util import make_vec_env
+    from baselines.common.vec_env.vec_frame_stack import VecFrameStack
+
+    for dir_name,env_id in match.items():
+        env = make_vec_env(env_id, 'atari', 1, 0,
+                            wrapper_kwargs={
+                                'clip_rewards':False,
+                                'episode_life':False,
+                            })
+        env = VecFrameStack(env, 4)
+
+        for type_ in ['bc','bco','bc_best_only']:
+            agent = PPO2Agent(env,'atari',str(logdir/dir_name/type_/'bc_model_full'),stochastic)
+
+            def _get_acc_reward():
+                ob = env.reset(); reward = 0; done = False
+                acc_reward = 0
+                while True:
+                    action = agent.act(ob, reward, done)
+                    ob, reward, done, _ = env.step(action)
+
+                    acc_reward += reward
+                    if done: break
+                return acc_reward
+
+            acc_rewards = [_get_acc_reward() for _ in range(num_episode)]
+            print('%s-%s: %f %f'%(dir_name,type_,np.mean(acc_rewards),np.std(acc_rewards)))
+        print()
+
 if __name__ == "__main__":
     # Required Args (target envs & learners)
     parser = argparse.ArgumentParser(description=None)
@@ -437,34 +482,4 @@ if __name__ == "__main__":
         train(args)
     else:
         eval(args)
-
-#def eval(args):
-#    env = gym.make(args.env_id)
-#
-#    logdir = str(Path(args.logbase_path) / args.env_id)
-#    policy = Policy(env.observation_space.shape[0],env.action_space.shape[0])
-#
-#    ### Initialize Parameters
-#    init_op = tf.group(tf.global_variables_initializer(),
-#                        tf.local_variables_initializer())
-#    # Training configuration
-#    config = tf.ConfigProto()
-#    config.gpu_options.allow_growth = True
-#    sess = tf.InteractiveSession()
-#
-#    sess.run(init_op)
-#    policy.saver.restore(sess,logdir+'/model.ckpt')
-#
-#    from performance_checker import gen_traj
-#    from gym.wrappers import Monitor
-#    perfs = []
-#    for j in range(args.num_trajs):
-#        if j == 0 and args.video_record:
-#            wrapped = Monitor(env, './video/',force=True)
-#        else:
-#            wrapped = env
-#
-#        perfs.append(gen_traj(wrapped,policy,args.render,args.max_len))
-#    print(logdir, ',', np.mean(perfs), ',', np.std(perfs))
-
 
