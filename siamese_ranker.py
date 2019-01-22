@@ -57,6 +57,19 @@ class Model(object):
         else:
             return tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,self.param_scope.name)
 
+class RandomAgent(object):
+    """The world's simplest agent!"""
+    def __init__(self, observation_space, action_space):
+        self.observation_space = observation_space
+        self.action_space = action_space
+        self.model_path = 'random_agent'
+
+    def act(self, observation, reward, done):
+        if len(self.observation_space.shape) == observation.ndim:
+            return self.action_space.sample()
+        else:
+            return np.array([self.action_space.sample() for _ in range(len(observation))])
+
 class PPO2Agent(object):
     def __init__(self, env, env_type, path, stochastic=False, gpu=True):
         from baselines.common.policies import build_policy

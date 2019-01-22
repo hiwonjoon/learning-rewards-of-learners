@@ -21,7 +21,7 @@ class RandomAgent(object):
         return self.action_space.sample()
 
 class PPO2Agent(object):
-    def __init__(self, env, env_type):
+    def __init__(self, env, env_type, stochastic=False):
         ob_space = env.observation_space
         ac_space = env.action_space
 
@@ -34,12 +34,16 @@ class PPO2Agent(object):
                         nsteps=1, ent_coef=0., vf_coef=0.,
                         max_grad_norm=0.)
         self.model = make_model()
-        
+        self.stochastic = stochastic
+
     def load(self, path):
         self.model.load(path)
-        
+
     def act(self, observation, reward, done):
-        a,v,state,neglogp = self.model.step(observation)
+        if self.stochastic:
+            a,v,state,neglogp = self.model.step(observation)
+        else:
+            a = self.model.act_model.act(observation)
         return a
 
 if __name__ == '__main__':
@@ -48,6 +52,7 @@ if __name__ == '__main__':
     parser.add_argument('--env_type', default='', help='mujoco or atari')
     parser.add_argument('--model_path', default='')
     parser.add_argument('--episode_count', default=100)
+    parser.add_argument('--stochastic', action='store_true')
     parser.add_argument('--record_video', action='store_true')
     parser.add_argument('--render', action='store_true')
     args = parser.parse_args()
@@ -79,7 +84,7 @@ if __name__ == '__main__':
     except AttributeError:
         pass
 
-    agent = PPO2Agent(env,args.env_type)
+    agent = PPO2Agent(env,args.env_type,args.stochastic)
     agent.load(args.model_path)
     #agent = RandomAgent(env.action_space)
 
@@ -99,6 +104,7 @@ if __name__ == '__main__':
 
             steps += 1
             acc_reward += reward
+
             if done:
                 print(steps,acc_reward)
                 break

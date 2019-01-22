@@ -131,6 +131,10 @@ class Dataset(object):
     def gen_traj(self,agent,min_length):
         obs, actions, rewards = [self.env.reset()], [], []
 
+        # For debug purpose
+        last_episode_idx = 0
+        acc_rewards = []
+
         while True:
             action = agent.act(obs[-1], None, None)
             ob, reward, done, _ = self.env.step(action)
@@ -143,20 +147,26 @@ class Dataset(object):
                 if len(obs) < min_length:
                     obs.pop()
                     obs.append(self.env.reset())
+
+                    acc_rewards.append(np.sum(rewards[last_episode_idx:]))
+                    last_episode_idx = len(rewards)
                 else:
                     obs.pop()
+
+                    acc_rewards.append(np.sum(rewards[last_episode_idx:]))
+                    last_episode_idx = len(rewards)
                     break
 
-        return np.stack(obs,axis=0), np.concatenate(actions,axis=0), np.array(rewards)
+        return np.concatenate(obs,axis=0), np.concatenate(actions,axis=0), np.concatenate(rewards,axis=0), np.mean(acc_rewards)
 
     def prebuilt(self,agents,min_length):
         assert len(agents)>0, 'no agent given'
         trajs = []
         for agent in tqdm(agents):
-            traj = self.gen_traj(agent,min_length)
+            (*traj), avg_acc_reward = self.gen_traj(agent,min_length)
 
             trajs.append(traj)
-            tqdm.write('model: %s avg reward: %f'%(agent.model_path,np.sum(traj[2])))
+            tqdm.write('model: %s avg reward: %f'%(agent.model_path,avg_acc_reward))
         obs,actions,rewards = zip(*trajs)
         self.trajs = (np.concatenate(obs,axis=0),np.concatenate(actions,axis=0),np.concatenate(rewards,axis=0))
 
