@@ -667,6 +667,7 @@ if __name__ == "__main__":
     parser.add_argument('--custom_reward', required=True, help='preference or preference_normalized')
     parser.add_argument('--ctrl_coeff', default=0.0, type=float)
     parser.add_argument('--alive_bonus', default=0.0, type=float)
+    parser.add_argument('--gamma', default=0.99, type=float)
     args = parser.parse_args()
 
     if not args.eval :
@@ -680,7 +681,7 @@ if __name__ == "__main__":
             print('openai_logdir is already exist.')
             exit()
 
-        template = 'python -m baselines.run --alg=ppo2 --env={env} --num_timesteps=1e6 --save_interval=10 --custom_reward {custom_reward} --custom_reward_kwargs="{kwargs}"'
+        template = 'python -m baselines.run --alg=ppo2 --env={env} --num_timesteps=1e6 --save_interval=10 --custom_reward {custom_reward} --custom_reward_kwargs="{kwargs}" --gamma {gamma}'
         kwargs = {
             "num_models":args.num_models,
             "include_action":args.include_action,
@@ -700,6 +701,7 @@ if __name__ == "__main__":
         cmd = template.format(
             env=args.env_id,
             custom_reward=args.custom_reward,
+            gamma=args.gamma,
             kwargs=str(kwargs))
 
         procs = []
@@ -735,11 +737,17 @@ if __name__ == "__main__":
         for step in trained_steps[::-1]:
             perfs = []
             for i in range(args.rl_runs):
-                path = str(agents_dir/('run_%d'%i)/'checkpoints'/step)
-                agent = PPO2Agent(env,args.env_type,path,stochastic=args.stochastic)
+                path = agents_dir/('run_%d'%i)/'checkpoints'/step
+
+                if path.exists() == False:
+                    continue
+
+                agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
                 perfs += [
                     get_x_pos(env,agent) for _ in range(5)
                 ]
+                print('[%s-%d] %f %f'%(step,i,np.mean(perfs[-5:]),np.std(perfs[-5:])))
+
             print('[%s] %f %f %f %f'%(step,np.mean(perfs),np.std(perfs),np.max(perfs),np.min(perfs)))
 
             #break
