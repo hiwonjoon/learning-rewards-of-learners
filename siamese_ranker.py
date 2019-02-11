@@ -125,10 +125,10 @@ class PPO2Agent(object):
         with self.graph.as_default():
             with self.sess.as_default():
                 if self.stochastic:
-                    a,v,state,neglogp = self.model.step(obs)
+                    a,v,state,neglogp = self.model.step(obs[None])
                 else:
-                    a = self.model.act_model.act(obs)
-        return a
+                    a = self.model.act_model.act(obs[None])
+        return a[0]
 
 class Dataset(object):
     def __init__(self,env_id):

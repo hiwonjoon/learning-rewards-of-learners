@@ -1,16 +1,17 @@
+import os
 import argparse
+from functools import partial
 from pathlib import Path
 import numpy as np
 import tensorflow as tf
 import gym
 from tqdm import tqdm
-import matplotlib
-matplotlib.use('agg')
-from matplotlib import pyplot as plt
-from imgcat import imgcat
+import pynvml as N
 
 from tf_commons.ops import *
 from siamese_ranker import PPO2Agent
+
+# TODO: merge train / train_with_dataset
 
 class RandomAgent(object):
     """The world's simplest agent!"""
@@ -21,52 +22,125 @@ class RandomAgent(object):
     def act(self, observation, reward, done):
         return self.action_space.sample()[None]
 
-class Model(object):
-    def __init__(self,include_action,ob_dim,ac_dim,batch_size=64,num_layers=2,embedding_dims=256,steps=None):
-        self.include_action = include_action
+
+################################
+
+class Net(object):
+    def input_preprocess(self,obs,acs):
+        # Be careful when implementing this.
+        # This function have to process raw input of obs and acs in the same manner as Dataset class does.
+        raise NotImplementedError
+
+    def build_input_placeholder(self,name):
+        raise NotImplementedError
+
+    def build_reward(self,x):
+        raise NotImplementedError
+
+    def build_weight_decay(self):
+        raise NotImplementedError
+
+class MujocoNet(Net):
+    def __init__(self,include_action,ob_dim,ac_dim,num_layers=2,embedding_dims=256):
         in_dims = ob_dim+ac_dim if include_action else ob_dim
 
-        self.inp = tf.placeholder(tf.float32,[None,in_dims])
-        self.x = tf.placeholder(tf.float32,[None,in_dims]) #[B*steps,in_dim]
-        self.y = tf.placeholder(tf.float32,[None,in_dims])
-        self.x_split = tf.placeholder(tf.int32,[batch_size]) # B-lengthed vector indicating the size of each steps
-        self.y_split = tf.placeholder(tf.int32,[batch_size]) # B-lengthed vector indicating the size of each steps
-        self.l = tf.placeholder(tf.int32,[batch_size]) # [0 when x is better 1 when y is better]
-        self.l2_reg = tf.placeholder(tf.float32,[]) # [0 when x is better 1 when y is better]
-
         with tf.variable_scope('weights') as param_scope:
-            self.fcs = []
+            fcs = []
             last_dims = in_dims
             for l in range(num_layers):
-                self.fcs.append(Linear('fc%d'%(l+1),last_dims,embedding_dims)) #(l+1) is gross, but for backward compatibility
+                fcs.append(Linear('fc%d'%(l+1),last_dims,embedding_dims)) #(l+1) is gross, but for backward compatibility
                 last_dims = embedding_dims
-            self.fcs.append(Linear('fc%d'%(num_layers+1),last_dims,1))
+            fcs.append(Linear('fc%d'%(num_layers+1),last_dims,1))
 
+        self.fcs = fcs
+        self.in_dims = in_dims
+        self.include_action = include_action
         self.param_scope = param_scope
 
-        # build graph
-        def _reward(x):
-            for fc in self.fcs[:-1]:
-                x = tf.nn.relu(fc(x))
-            r = tf.squeeze(self.fcs[-1](x),axis=1)
-            return x, r
+    def input_preprocess(self,obs,acs):
+        return \
+            np.concatenate((obs,acs),axis=1) if self.include_action \
+            else obs
 
-        self.fv, self.r = _reward(self.inp)
+    def build_input_placeholder(self,name):
+        return tf.placeholder(tf.float32,[None,self.in_dims],name=name)
 
-        _, rs_xs = _reward(self.x)
+    def build_reward(self,x):
+        for fc in self.fcs[:-1]:
+            x = tf.nn.relu(fc(x))
+        r = tf.squeeze(self.fcs[-1](x),axis=1)
+        return x, r
+
+    def build_weight_decay(self):
+        weight_decay = 0.
+        for fc in self.fcs:
+            weight_decay += tf.reduce_sum(fc.w**2)
+        return weight_decay
+
+class AtariNet(Net):
+    def __init__(self,ob_shape,embedding_dims=128):
+        in_dims = list(ob_shape)
+
+        with tf.variable_scope('weights') as param_scope:
+            nets = []
+            nets.append(Conv2d('conv1',4,32,k_h=8,k_w=8,d_h=4,d_w=4,data_format='NHWC',padding='VALID'))
+            nets.append(Conv2d('conv2',32,64,k_h=4,k_w=4,d_h=2,d_w=2,data_format='NHWC',padding='VALID'))
+            nets.append(Conv2d('conv3',64,64,k_h=3,k_w=3,d_h=2,d_w=2,data_format='NHWC',padding='VALID'))
+            nets.append(Linear('fc1',64*4*4, embedding_dims))
+            nets.append(Linear('fc2',embedding_dims, 1))
+
+        self.nets = nets
+        self.in_dims = in_dims
+        self.param_scope = param_scope
+
+    # build graph
+    def input_preprocess(self,obs,acs):
+        return obs
+
+    def build_input_placeholder(self,name):
+        return tf.placeholder(tf.float32,[None]+self.in_dims,name=name)
+
+    def build_reward(self,x):
+        for layer in self.nets[:-1]:
+            x = tf.nn.relu(layer(x))
+        r = tf.squeeze(self.nets[-1](x),axis=1)
+        return x, r
+
+    def build_weight_decay(self):
+        weight_decay = 0.
+        for layers in self.nets:
+            weight_decay += tf.reduce_sum(layers.w**2)
+        return weight_decay
+
+class Model(object):
+    def __init__(self,net:Net,batch_size=64):
+        self.B = batch_size
+        self.net = net
+
+        self.x = net.build_input_placeholder('x') # tensor shape of [B*steps] + input_dims
+        self.x_split = tf.placeholder(tf.int32,[self.B]) # B-lengthed vector indicating the size of each steps
+        self.y = net.build_input_placeholder('y') # tensor shape of [B*steps] + input_dims
+        self.y_split = tf.placeholder(tf.int32,[self.B]) # B-lengthed vector indicating the size of each steps
+        self.l = tf.placeholder(tf.int32,[self.B]) # [0 when x is better 1 when y is better]
+
+        self.l2_reg = tf.placeholder(tf.float32,[]) # [0 when x is better 1 when y is better]
+
+        # Graph Ops for Inference
+        self.fv, self.r = net.build_reward(self.x)
+
+        # Graph ops for training
+        _, rs_xs = net.build_reward(self.x)
         self.v_x = tf.stack([tf.reduce_sum(rs_x) for rs_x in tf.split(rs_xs,self.x_split,axis=0)],axis=0)
 
-        _, rs_ys = _reward(self.y)
+        _, rs_ys = net.build_reward(self.y)
         self.v_y = tf.stack([tf.reduce_sum(rs_y) for rs_y in tf.split(rs_ys,self.y_split,axis=0)],axis=0)
 
         logits = tf.stack([self.v_x,self.v_y],axis=1) #[None,2]
         loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits,labels=self.l)
         self.loss = tf.reduce_mean(loss,axis=0)
 
-        weight_decay = 0.
-        for fc in self.fcs:
-            weight_decay += tf.reduce_sum(fc.w**2)
-
+        # Regualarizer Ops
+        weight_decay = net.build_weight_decay()
         self.l2_loss = self.l2_reg * weight_decay
 
         pred = tf.cast(tf.greater(self.v_y,self.v_x),tf.int32)
@@ -79,19 +153,21 @@ class Model(object):
 
     def parameters(self,train=False):
         if train:
-            return tf.trainable_variables(self.param_scope.name)
+            return tf.trainable_variables(self.net.param_scope.name)
         else:
-            return tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,self.param_scope.name)
+            return tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,self.net.param_scope.name)
 
-    def train(self,D,batch_size=64,iter=10000,l2_reg=0.01,noise_level=0.1,debug=False):
+    def train(self,D,iter=10000,l2_reg=0.01,noise_level=0.1,debug=False,early_term=False):
         """
-        Training will be early-terminate when validation accuracy becomes large enough..?
-
         args:
             D: list of triplets (\sigma^1,\sigma^2,\mu)
-            while
-                sigma^{1,2}: shape of [steps,in_dims]
-                mu : 0 or 1
+                while
+                    sigma^{1,2}: shape of [steps,in_dims]
+                    mu : 0 or 1
+            l2_reg
+            noise_level: input label noise to prevent overfitting
+            debug: print training statistics
+            early_term:  training will be early-terminate when validation accuracy is larger than 95%
         """
         sess = tf.get_default_session()
 
@@ -99,13 +175,8 @@ class Model(object):
         train_idxes = idxes[:int(len(D)*0.8)]
         valid_idxes = idxes[int(len(D)*0.8):]
 
-        def _batch(idx_list,add_noise):
+        def _load(idxes,add_noise=True):
             batch = []
-
-            if len(idx_list) > batch_size:
-                idxes = np.random.choice(idx_list,batch_size,replace=False)
-            else:
-                idxes = idx_list
 
             for i in idxes:
                 batch.append(D[i])
@@ -116,12 +187,55 @@ class Model(object):
             b_x,b_y,b_l = np.concatenate(b_x,axis=0),np.concatenate(b_y,axis=0),np.array(b_l)
 
             if add_noise:
-                b_l = (b_l + np.random.binomial(1,noise_level,batch_size)) % 2 #Flip it with probability 0.1
+                b_l = (b_l + np.random.binomial(1,noise_level,self.B)) % 2 #Flip it with probability 0.1
+
+            return b_x.astype(np.float32),b_y.astype(np.float32),x_split,y_split,b_l
+
+
+        def _batch(idx_list,add_noise):
+            if len(idx_list) > self.B:
+                idxes = np.random.choice(idx_list,self.B,replace=False)
+            else:
+                idxes = idx_list
+
+            return _load(idxes,add_noise)
+
+        def load(idxes):
+            b_x,b_y,x_split,y_split,b_l =\
+                tf.py_func(_load, [idxes], [tf.float32,tf.float32,tf.int64,tf.int64,tf.int64], stateful=False)
+            b_x = tf.reshape(b_x,[-1,84,84,4])
+            b_y = tf.reshape(b_y,[-1,84,84,4])
+            x_split = tf.reshape(x_split,[self.B])
+            y_split = tf.reshape(y_split,[self.B])
+            b_l = tf.reshape(b_l,[self.B])
 
             return b_x,b_y,x_split,y_split,b_l
 
+        ds = tf.data.Dataset.range(len(D))
+        ds = ds.repeat(-1)
+        ds = ds.shuffle(len(D))
+        ds = ds.batch(64)
+        ds = ds.map(load, num_parallel_calls=8)
+        ds = ds.prefetch(10)
+
+        batch_op = ds.make_one_shot_iterator().get_next()
+
+        """
+        def gen(idx_list,add_noise):
+            while True:
+                yield _batch(idx_list,add_noise)
+        ds = tf.data.Dataset.from_generator(
+            partial(gen,train_idxes,True),
+            (tf.float32, tf.float32, tf.int32, tf.int32, tf.int32),
+            (tf.TensorShape([None,84,84,4]), tf.TensorShape([None,84,84,4]),
+            tf.TensorShape([self.B]),tf.TensorShape([self.B]),tf.TensorShape([self.B])))
+        ds = ds.prefetch(buffer_size=10)
+        batch_op = ds.make_one_shot_iterator().get_next()
+        """
+
         for it in tqdm(range(iter),dynamic_ncols=True):
-            b_x,b_y,x_split,y_split,b_l = _batch(train_idxes,add_noise=True)
+            #b_x,b_y,x_split,y_split,b_l = _batch(train_idxes,add_noise=True)
+            b_x,b_y,x_split,y_split,b_l = sess.run(batch_op)
 
             loss,l2_loss,acc,_ = sess.run([self.loss,self.l2_loss,self.acc,self.update_op],feed_dict={
                 self.x:b_x,
@@ -144,16 +258,16 @@ class Model(object):
                     })
                     tqdm.write(('loss: %f (l2_loss: %f), acc: %f, valid_acc: %f'%(loss,l2_loss,acc,valid_acc)))
 
-            #if valid_acc >= 0.95:
-            #    print('loss: %f (l2_loss: %f), acc: %f, valid_acc: %f'%(loss,l2_loss,acc,valid_acc))
-            #    print('early termination@%08d'%it)
-            #    break
+            if early_term and valid_acc >= 0.95:
+                print('loss: %f (l2_loss: %f), acc: %f, valid_acc: %f'%(loss,l2_loss,acc,valid_acc))
+                print('early termination@%08d'%it)
+                break
 
-    def train_with_dataset(self,dataset,batch_size,include_action=False,iter=10000,l2_reg=0.01,debug=False):
+    def train_with_dataset(self,dataset,iter=10000,l2_reg=0.01,debug=False):
         sess = tf.get_default_session()
 
         for it in tqdm(range(iter),dynamic_ncols=True):
-            b_x,b_y,x_split,y_split,b_l = dataset.batch(batch_size=batch_size,include_action=include_action)
+            b_x,b_y,x_split,y_split,b_l = dataset.batch(batch_size=self.B,include_action=self.net.include_action)
             loss,l2_loss,acc,_ = sess.run([self.loss,self.l2_loss,self.acc,self.update_op],feed_dict={
                 self.x:b_x,
                 self.y:b_y,
@@ -167,38 +281,15 @@ class Model(object):
                 if it % 100 == 0 or it < 10:
                     tqdm.write(('loss: %f (l2_loss: %f), acc: %f'%(loss,l2_loss,acc)))
 
-    def eval(self,D,batch_size=64):
-        sess = tf.get_default_session()
-
-        b_x,b_y,b_l = zip(*D)
-        b_x,b_y,b_l = np.array(b_x),np.array(b_y),np.array(b_l)
-
-        b_r_x, b_acc = [], 0.
-
-        for i in range(0,len(b_x),batch_size):
-            sum_r_x, acc = sess.run([self.sum_r_x,self.acc],feed_dict={
-                self.x:b_x[i:i+batch_size],
-                self.y:b_y[i:i+batch_size],
-                self.l:b_l[i:i+batch_size]
-            })
-
-            b_r_x.append(sum_r_x)
-            b_acc += len(sum_r_x)*acc
-
-        return np.concatenate(b_r_x,axis=0), b_acc/len(b_x)
-
     def get_reward(self,obs,acs,batch_size=1024):
         sess = tf.get_default_session()
 
-        if self.include_action:
-            inp = np.concatenate((obs,acs),axis=1)
-        else:
-            inp = obs
+        inp = self.net.input_preprocess(obs,acs)
 
         b_r = []
         for i in range(0,len(obs),batch_size):
             r = sess.run(self.r,feed_dict={
-                self.inp:inp[i:i+batch_size]
+                self.x:inp[i:i+batch_size]
             })
 
             b_r.append(r)
@@ -206,8 +297,10 @@ class Model(object):
         return np.concatenate(b_r,axis=0)
 
 class GTDataset(object):
-    def __init__(self,env):
+    def __init__(self,env,env_type):
         self.env = env
+        self.env_type = env_type
+
         self.unwrapped = env
         while hasattr(self.unwrapped,'env'):
             self.unwrapped = self.unwrapped.env
@@ -219,7 +312,8 @@ class GTDataset(object):
         while True:
             action = agent.act(obs[-1], None, None)
             ob, reward, done, _ = self.env.step(action)
-            if self.unwrapped.sim.data.qpos[0] > max_x_pos:
+
+            if self.env_type == 'mujoco' and self.unwrapped.sim.data.qpos[0] > max_x_pos:
                 max_x_pos = self.unwrapped.sim.data.qpos[0]
 
             obs.append(ob)
@@ -234,7 +328,10 @@ class GTDataset(object):
                     obs.pop()
                     break
 
-        return (np.stack(obs,axis=0), np.concatenate(actions,axis=0), np.array(rewards)), max_x_pos
+        return (np.stack(obs,axis=0), np.array(actions), np.array(rewards)), max_x_pos
+
+    def load_prebuilt(self,logdir):
+        return False
 
     def prebuilt(self,agents,min_length):
         assert len(agents)>0, 'no agent given'
@@ -271,8 +368,8 @@ class GTDataset(object):
         return D
 
 class GTTrajLevelDataset(GTDataset):
-    def __init__(self,env):
-        super().__init__(env)
+    def __init__(self,env,env_type):
+        super().__init__(env,env_type)
 
     def prebuilt(self,agents,min_length):
         assert len(agents)>0, 'no agent is given'
@@ -323,11 +420,20 @@ class GTTrajLevelDataset(GTDataset):
         return D
 
 class GTTrajLevelNoStepsDataset(GTTrajLevelDataset):
-    def __init__(self,env,max_steps):
-        super().__init__(env)
+    def __init__(self,env,env_type,max_steps):
+        super().__init__(env,env_type)
         self.max_steps = max_steps
 
-    def prebuilt(self,agents,min_length):
+    def load_prebuilt(self,logdir):
+        if os.path.exists(os.path.join(logdir,'prebuilt.npz')):
+            f = np.load(os.path.join(logdir,'prebuilt.npz'))
+            self.trajs = f['trajs']
+            self.trajs_rank = f['trajs_rank']
+            return True
+        else:
+            return False
+
+    def prebuilt(self,agents,min_length,logdir=None):
         assert len(agents)>0, 'no agent is given'
 
         trajs = []
@@ -338,6 +444,10 @@ class GTTrajLevelNoStepsDataset(GTTrajLevelDataset):
                 agent_trajs.append((obs,actions,rewards))
             trajs.append(agent_trajs)
 
+            agent_reward = np.mean([np.sum(rewards) for _,_,rewards in agent_trajs])
+            avg_len = np.mean([len(rewards) for _,_,rewards in agent_trajs])
+            tqdm.write('model: %s eps len: %f avg reward: %f'%(agent.model_path,avg_len,agent_reward))
+
         agent_rewards = [np.mean([np.sum(rewards) for _,_,rewards in agent_trajs]) for agent_trajs in trajs]
 
         self.trajs = trajs
@@ -345,6 +455,9 @@ class GTTrajLevelNoStepsDataset(GTTrajLevelDataset):
         _idxes = np.argsort(agent_rewards) # rank 0 is the most bad demo.
         self.trajs_rank = np.empty_like(_idxes)
         self.trajs_rank[_idxes] = np.arange(len(_idxes))
+
+        if logdir is not None:
+            np.savez(os.path.join(logdir,'prebuilt.npz'),trajs=self.trajs,trajs_rank=self.trajs_rank)
 
     def sample(self,num_samples,steps=None,include_action=False):
         assert steps == None
@@ -392,12 +505,12 @@ class GTTrajLevelNoStepsDataset(GTTrajLevelDataset):
         return D
 
 class GTTrajLevelNoSteps_Noise_Dataset(GTTrajLevelNoStepsDataset):
-    def __init__(self,env,max_steps,ranking_noise=0):
-        super().__init__(env,max_steps)
+    def __init__(self,env,env_type,max_steps,ranking_noise=0):
+        super().__init__(env,env_type,max_steps)
         self.ranking_noise = ranking_noise
 
-    def prebuilt(self,agents,min_length):
-        super().prebuilt(agents,min_length)
+    def prebuilt(self,agents,min_length,logdir):
+        super().prebuilt(agents,min_length,logdir)
 
         original_trajs_rank = self.trajs_rank.copy()
         for _ in range(self.ranking_noise):
@@ -414,8 +527,8 @@ class GTTrajLevelNoSteps_Noise_Dataset(GTTrajLevelNoStepsDataset):
         print('Total Order Correctness: %f'%(np.count_nonzero(order_correctness)/len(order_correctness)))
 
 class GTTrajLevelNoSteps_N_Mix_Dataset(GTTrajLevelNoStepsDataset):
-    def __init__(self,env,N,max_steps):
-        super().__init__(env,max_steps)
+    def __init__(self,env,env_type,N,max_steps):
+        super().__init__(env,env_type,max_steps)
 
         self.N = N
         self.max_steps = max_steps
@@ -467,8 +580,8 @@ class GTTrajLevelNoSteps_N_Mix_Dataset(GTTrajLevelNoStepsDataset):
         return xs, ys, x_split, y_split, np.ones((batch_size,)).astype(np.int32)
 
 class LearnerDataset(GTTrajLevelDataset):
-    def __init__(self,env,min_margin):
-        super().__init__(env)
+    def __init__(self,env,env_type,min_margin):
+        super().__init__(env,env_type)
         self.min_margin = min_margin
 
     def sample(self,num_samples,steps=40,include_action=False):
@@ -509,9 +622,14 @@ class LearnerDataset(GTTrajLevelDataset):
 
 
 def train(args):
+    # set random seed
+    np.random.seed(args.seed)
+    tf.random.set_random_seed(args.seed)
+
+    # set log dir
     logdir = Path(args.log_dir)
 
-    if logdir.exists() :
+    if logdir.exists() and 'temp' not in args.log_dir:
         c = input('log dir is already exist. continue to train a preference model? [Y/etc]? ')
         if c in ['YES','yes','Y']:
             import shutil
@@ -520,41 +638,61 @@ def train(args):
             print('good bye')
             return
 
-    logdir.mkdir(parents=True)
+    logdir.mkdir(parents=True,exist_ok=True)
     with open(str(logdir/'args.txt'),'w') as f:
         f.write( str(args) )
-
     logdir = str(logdir)
-    env = gym.make(args.env_id)
 
-    train_agents = [RandomAgent(env.action_space)] if args.random_agent else []
+    # make env
+    if args.env_type == 'mujoco':
+        env = gym.make(args.env_id)
+    elif args.env_type == 'atari':
+        from baselines.common.atari_wrappers import make_atari, wrap_deepmind
+        #TODO: episode_life True or False?
+        env = wrap_deepmind(make_atari(args.env_id),episode_life=False,clip_rewards=False,frame_stack=True,scale=False)
 
-    models = sorted([p for p in Path(args.learners_path).glob('?????') if int(p.name) <= args.max_chkpt])
-    for path in models:
-        agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-        train_agents.append(agent)
+    ob_shape = env.observation_space.shape
+    ac_dims = env.action_space.n if env.action_space.dtype == int else env.action_space.shape[-1]
 
+    # make dataset (generate demonstration traj)
     if args.preference_type == 'gt':
-        dataset = GTDataset(env)
+        dataset = GTDataset(env,args.env_type)
     elif args.preference_type == 'gt_traj':
-        dataset = GTTrajLevelDataset(env)
+        dataset = GTTrajLevelDataset(env,args.env_type)
     elif args.preference_type == 'gt_traj_no_steps':
-        dataset = GTTrajLevelNoStepsDataset(env,args.max_steps)
+        dataset = GTTrajLevelNoStepsDataset(env,args.env_type,args.max_steps)
     elif args.preference_type == 'gt_traj_no_steps_noise':
-        dataset = GTTrajLevelNoSteps_Noise_Dataset(env,args.max_steps,args.traj_noise)
+        dataset = GTTrajLevelNoSteps_Noise_Dataset(env,args.env_type,args.max_steps,args.traj_noise)
     elif args.preference_type == 'gt_traj_no_steps_n_mix':
-        dataset = GTTrajLevelNoSteps_N_Mix_Dataset(env,args.N,args.max_steps)
+        dataset = GTTrajLevelNoSteps_N_Mix_Dataset(env,args.env_type,args.N,args.max_steps)
     elif args.preference_type == 'time':
-        dataset = LearnerDataset(env,args.min_margin)
+        dataset = LearnerDataset(env,args.env_type,args.min_margin)
     else:
         assert False, 'specify prefernce type'
 
-    dataset.prebuilt(train_agents,args.min_length)
+    loaded = dataset.load_prebuilt(logdir)
+
+    if loaded == False:
+        # load demonstrator
+        train_agents = [RandomAgent(env.action_space)] if args.random_agent else []
+
+        models = sorted([p for p in Path(args.learners_path).glob('?????') if int(p.name) <= args.max_chkpt])
+        for path in models:
+            agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
+            train_agents.append(agent)
+
+        dataset.prebuilt(train_agents,args.min_length,logdir)
 
     models = []
     for i in range(args.num_models):
         with tf.variable_scope('model_%d'%i):
-            models.append(Model(args.include_action,env.observation_space.shape[0],env.action_space.shape[0],steps=args.steps,num_layers=args.num_layers,embedding_dims=args.embedding_dims))
+            if args.env_type == 'mujoco':
+                net = MujocoNet(args.include_action,ob_shape[-1],ac_dims,num_layers=args.num_layers,embedding_dims=args.embedding_dims)
+            elif args.env_type == 'atari':
+                net = AtariNet(ob_shape,embedding_dims=args.embedding_dims)
+
+            model = Model(net,batch_size=64)
+            models.append(model)
 
     ### Initialize Parameters
     init_op = tf.group(tf.global_variables_initializer(),
@@ -576,95 +714,42 @@ def train(args):
 
         model.saver.save(sess,logdir+'/model_%d.ckpt'%(i),write_meta_graph=False)
 
-def eval(args):
-    logdir = str(Path(args.logbase_path) / args.env_id)
-
-    env = gym.make(args.env_id)
-
-    valid_agents = []
-    models = sorted(Path(args.learners_path).glob('?????'))
-    for path in models:
-        if path.name > args.max_chkpt:
-            continue
-        agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-        valid_agents.append(agent)
-
-    test_agents = []
-    for i,path in enumerate(models):
-        if i % 10 == 0:
-            agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-            test_agents.append(agent)
-
-    gt_dataset= GTDataset(env)
-    gt_dataset.prebuilt(valid_agents,-1)
-
-    gt_dataset_test = GTDataset(env)
-    gt_dataset_test.prebuilt(test_agents,-1)
-
-    models = []
-    for i in range(args.num_models):
-        with tf.variable_scope('model_%d'%i):
-            models.append(Model(args.include_action,env.observation_space.shape[0],env.action_space.shape[0],steps=args.steps))
-
-    ### Initialize Parameters
-    init_op = tf.group(tf.global_variables_initializer(),
-                        tf.local_variables_initializer())
-    # Training configuration
-    config = tf.ConfigProto()
-    config.gpu_options.allow_growth = True
-    sess = tf.InteractiveSession()
-
-    sess.run(init_op)
-
-    for i,model in enumerate(models):
-        model.saver.restore(sess,logdir+'/model_%d.ckpt'%(i))
-
-        print('model %d'%i)
-        obs, acs, r = gt_dataset.trajs
-        r_hat = model.get_reward(obs, acs)
-
-        obs, acs, r_test = gt_dataset_test.trajs
-        r_hat_test = model.get_reward(obs, acs)
-
-        fig,axes = plt.subplots(1,2)
-        axes[0].plot(r,r_hat,'o')
-        axes[1].plot(r_test,r_hat_test,'o')
-        fig.savefig('model_%d.png'%i)
-        imgcat(fig)
-        plt.close(fig)
-
-        np.savez('model_%d.npz'%i,r=r,r_hat=r_hat,r_test=r_test,r_hat_test=r_hat_test)
-
-
 if __name__ == "__main__":
     # Required Args (target envs & learners)
     parser = argparse.ArgumentParser(description=None)
+    parser.add_argument('--seed', default=0, type=int, help='seed for the experiments')
+    parser.add_argument('--log_dir', required=True)
+    parser.add_argument('--eval', action='store_true', help='path to log base (env_id will be concatenated at the end)')
+    # Env Setting
     parser.add_argument('--env_id', default='', help='Select the environment to run')
-    parser.add_argument('--env_type', default='', help='mujoco or atari')
+    parser.add_argument('--env_type', default='', help='mujoco or atari', choices=['mujoco','atari'])
+    # Demonstrator Setting
+    parser.add_argument('--random_agent', action='store_true', help='whether to use default random agent')
     parser.add_argument('--learners_path', default='', help='path of learning agents')
     parser.add_argument('--max_chkpt', default=240, type=int, help='decide upto what learner stage you want to give')
+    parser.add_argument('--stochastic', action='store_true', help='whether want to use stochastic agent or not')
+    parser.add_argument('--min_length', default=1000,type=int, help='minimum length of trajectory generated by each agent')
+    # Dataset setting
+    parser.add_argument('--preference_type', help='gt or gt_traj or time or gt_traj_no_steps, gt_traj_no_steps_n_mix; if gt then preference will be given as a GT reward, otherwise, it is given as a time index')
+    parser.add_argument('--D', default=1000, type=int, help='|D| in the preference paper')
     parser.add_argument('--steps', default=None, type=int, help='length of snippets')
     parser.add_argument('--max_steps', default=None, type=int, help='length of max snippets (gt_traj_no_steps only)')
     parser.add_argument('--traj_noise', default=None, type=int, help='number of adjacent swaps (gt_traj_no_steps_noise only)')
-    parser.add_argument('--min_length', default=1000,type=int, help='minimum length of trajectory generated by each agent')
+    parser.add_argument('--N', default=10, type=int, help='number of trajactory mix (gt_traj_no_steps_n_mix only)')
+    parser.add_argument('--min_margin', default=1, type=int, help='when prefernce type is "time", the minimum margin that we can assure there exist a margin')
+    parser.add_argument('--include_action', action='store_true', help='whether to include action for the model or not')
+    # Network setting
     parser.add_argument('--num_layers', default=2, type=int, help='number layers of the reward network')
     parser.add_argument('--embedding_dims', default=256, type=int, help='embedding dims')
     parser.add_argument('--num_models', default=3, type=int, help='number of models to ensemble')
     parser.add_argument('--l2_reg', default=0.01, type=float, help='l2 regularization size')
     parser.add_argument('--noise', default=0.1, type=float, help='noise level to add on training label')
-    parser.add_argument('--D', default=1000, type=int, help='|D| in the preference paper')
-    parser.add_argument('--N', default=10, type=int, help='number of trajactory mix (gt_traj_no_steps_n_mix only)')
-    parser.add_argument('--log_dir', required=True)
-    parser.add_argument('--preference_type', help='gt or gt_traj or time or gt_traj_no_steps, gt_traj_no_steps_n_mix; if gt then preference will be given as a GT reward, otherwise, it is given as a time index')
-    parser.add_argument('--min_margin', default=1, type=int, help='when prefernce type is "time", the minimum margin that we can assure there exist a margin')
-    parser.add_argument('--include_action', action='store_true', help='whether to include action for the model or not')
-    parser.add_argument('--stochastic', action='store_true', help='whether want to use stochastic agent or not')
-    parser.add_argument('--random_agent', action='store_true', help='whether to use default random agent')
-    parser.add_argument('--eval', action='store_true', help='path to log base (env_id will be concatenated at the end)')
     # Args for PPO
     parser.add_argument('--rl_runs', default=1, type=int)
     parser.add_argument('--ppo_log_path', default='ppo2')
     parser.add_argument('--custom_reward', required=True, help='preference or preference_normalized')
+    parser.add_argument('--num_timesteps', default=int(1e6), type=int)
+    parser.add_argument('--save_interval', default=10, type=int)
     parser.add_argument('--ctrl_coeff', default=0.0, type=float)
     parser.add_argument('--alive_bonus', default=0.0, type=float)
     parser.add_argument('--gamma', default=0.99, type=float)
@@ -672,22 +757,26 @@ if __name__ == "__main__":
 
     if not args.eval :
         # Train a Preference Model
-        train(args)
+        #train(args)
+
+        # Preferene based reward model analysis (draw figure)
+        #import model_analysis
+        #model_analysis.reward_analysis(args.log_dir)
 
         # Train an agent
-        import os, subprocess
+        import os, subprocess, multiprocessing
+        ncpu = multiprocessing.cpu_count()
+        N.nvmlInit()
+        ngpu = N.nvmlDeviceGetCount()
+
         openai_logdir = Path(os.path.abspath(os.path.join(args.log_dir,args.ppo_log_path)))
         if openai_logdir.exists():
             print('openai_logdir is already exist.')
             exit()
 
-        template = 'python -m baselines.run --alg=ppo2 --env={env} --num_timesteps=1e6 --save_interval=10 --custom_reward {custom_reward} --custom_reward_kwargs="{kwargs}" --gamma {gamma}'
+        template = 'python -m baselines.run --alg=ppo2 --env={env} --num_env={nenv} --num_timesteps={num_timesteps} --save_interval={save_interval} --custom_reward {custom_reward} --custom_reward_kwargs="{kwargs}" --gamma {gamma}'
         kwargs = {
-            "num_models":args.num_models,
-            "include_action":args.include_action,
             "model_dir":os.path.abspath(args.log_dir),
-            "num_layers":args.num_layers,
-            "embedding_dims":args.embedding_dims,
             "ctrl_coeff":args.ctrl_coeff,
             "alive_bonus":args.alive_bonus
         }
@@ -700,6 +789,9 @@ if __name__ == "__main__":
 
         cmd = template.format(
             env=args.env_id,
+            nenv=ncpu//ngpu,
+            num_timesteps=args.num_timesteps,
+            save_interval=args.save_interval,
             custom_reward=args.custom_reward,
             gamma=args.gamma,
             kwargs=str(kwargs))
@@ -723,8 +815,6 @@ if __name__ == "__main__":
             p.wait()
 
     else:
-        # eval(args)
-
         import os
         from performance_checker import gen_traj as get_x_pos
 
