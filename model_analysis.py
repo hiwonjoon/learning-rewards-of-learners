@@ -10,7 +10,7 @@ from matplotlib import pyplot as plt
 from imgcat import imgcat
 
 from siamese_ranker import PPO2Agent
-from preference_learning import Model, MujocoNet, AtariNet
+from preference_learning import Model, MujocoNet, AtariNet, AtariNetV2
 
 # Matplotlib setting
 rcParams = {'legend.fontsize': 'xx-large',
@@ -99,22 +99,7 @@ def reward_analysis(model_path):
     ob_shape = env.observation_space.shape
     ac_dims = env.action_space.n if env.action_space.dtype == int else env.action_space.shape[-1]
 
-    train_agents = []
-    test_agents = []
-    models = sorted([p for p in Path(args.learners_path).glob('?????')]) # if int(p.name) <= args.max_chkpt])
-    for path in models:
-        agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
-
-        if int(path.name) <= args.max_chkpt:
-            train_agents.append(agent)
-        else:
-            test_agents.append(agent)
-
-    from preference_learning import GTTrajLevelNoStepsDataset as Dataset
-    dataset = Dataset(env,args.env_type,1000)
-    dataset.prebuilt(train_agents+test_agents,1000)
-
-    # Training configuration
+    # Load Trained Reward Model
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
     sess = tf.InteractiveSession()
@@ -125,12 +110,36 @@ def reward_analysis(model_path):
             if args.env_type == 'mujoco':
                 net = MujocoNet(args.include_action,ob_shape[-1],ac_dims,num_layers=args.num_layers,embedding_dims=args.embedding_dims)
             elif args.env_type == 'atari':
-                net = AtariNet(ob_shape,embedding_dims=args.embedding_dims)
+                #net = AtariNet(ob_shape,embedding_dims=args.embedding_dims)
+                net = AtariNetV2(ob_shape,embedding_dims=args.embedding_dims)
 
             model = Model(net,batch_size=1)
             model.saver.restore(sess,os.path.join(model_path,'model_%d.ckpt'%i))
 
             models.append(model)
+
+    # Build Dataset
+    train_agents = []
+    test_agents = []
+    agents = sorted([p for p in Path(args.learners_path).glob('?????')]) # if int(p.name) <= args.max_chkpt])
+
+    train_chkpt = eval(args.train_chkpt)
+    if type(train_chkpt) == int:
+        train_chkpt = list(range(train_chkpt+1))
+    else:
+        train_chkpt = list(train_chkpt)
+
+    for path in agents:
+        agent = PPO2Agent(env,args.env_type,str(path),stochastic=args.stochastic)
+
+        if int(path.name) in train_chkpt:
+            train_agents.append(agent)
+        else:
+            test_agents.append(agent)
+
+    from preference_learning import GTTrajLevelNoStepsDataset as Dataset
+    dataset = Dataset(env,args.env_type,1000)
+    dataset.prebuilt(train_agents+test_agents,1000)
 
     rank_acc_r_pts = []
     acc_r_pts = []
@@ -154,6 +163,8 @@ def reward_analysis(model_path):
 
     np.savez(model_path+'/reward_analysis.npz',rank_acc_r_pts=rank_acc_r_pts,acc_r_pts=acc_r_pts)
 
+    sess.close()
+
     def convert_range(x,minimum, maximum,a,b):
         return (x - minimum)/(maximum - minimum) * (b - a) + a\
 
@@ -162,7 +173,7 @@ def reward_analysis(model_path):
 
         gt_max,gt_min = max(gt_returns),min(gt_returns)
         pred_max,pred_min = max(pred_returns),min(pred_returns)
-        max_observed = max(pred_returns[:seen_ptr])
+        max_observed = max(gt_returns[:seen_ptr])
 
         # Draw P
         fig,ax = plt.subplots()
