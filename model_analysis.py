@@ -83,6 +83,63 @@ def linear_model_analysis(args):
         input()
         plt.close(fig)
 
+def draw(gt_returns, pred_returns, seen, filepath, convert_range=True):
+    seen_ptr = np.max(np.where(seen))
+
+    gt_max,gt_min = max(gt_returns),min(gt_returns)
+    pred_max,pred_min = max(pred_returns),min(pred_returns)
+    max_observed = max(gt_returns[:seen_ptr])
+
+    if convert_range:
+        convert_range = lambda x,minimum, maximum,a,b: (x - minimum)/(maximum - minimum) * (b - a) + a
+        pred_returns = [convert_range(p,pred_max,pred_min,gt_max,gt_min) for p in pred_returns]
+
+    # Draw P
+    fig,ax = plt.subplots()
+
+    ax.plot(gt_returns[:seen_ptr], pred_returns[:seen_ptr], 'o', color='red')
+    ax.plot(gt_returns[seen_ptr:], pred_returns[seen_ptr:], 'o', color='blue')
+    #ax.plot([gt_min-5,gt_max+5],[gt_min-5,gt_max+5],'g--')
+    #ax.plot([gt_min-5,max_observed],[gt_min-5,max_observed],'k-', linewidth=2)
+
+    #ax.axis([gt_min-5,gt_max+5,gt_min-5,gt_max+5])
+    ax.set_xlabel("Ground Truth Returns")
+    ax.set_ylabel("Predicted Returns (normalized)")
+    fig.tight_layout()
+    fig.savefig(filepath,dpi=400)
+
+    plt.close(fig)
+
+    """
+    fig,ax = plt.subplots()
+    x,y,seen = (np.array(e) for e in zip(*rank_acc_r_pts))
+    seen_ptr = np.max(np.where(seen))
+    ax.scatter(x=x[:seen_ptr],y=y[:seen_ptr],color='blue')
+    ax.scatter(x=x[seen_ptr:],y=y[seen_ptr:],color='red')
+    fig.savefig(args.model_path+'/rank_vs_acc_r_hat.png')
+    #imgcat(fig)
+    plt.close(fig)
+
+    fig,ax = plt.subplots()
+    x,y,seen = (np.array(e) for e in zip(*acc_r_pts))
+    seen_ptr = np.max(np.where(seen))
+    ax.scatter(x=x[:seen_ptr],y=y[:seen_ptr],color='blue')
+    ax.scatter(x=x[seen_ptr:],y=y[seen_ptr:],color='red')
+    fig.savefig(args.model_path+'/acc_r_vs_acc_r_hat.png')
+    #imgcat(fig)
+    plt.close(fig)
+
+    fig,ax = plt.subplots()
+    x,y,seen = (np.array(e) for e in zip(*r_pts))
+    seen_ptr = np.max(np.where(seen))
+    ax.scatter(x=x[:seen_ptr],y=y[:seen_ptr],color='blue')
+    ax.scatter(x=x[seen_ptr:],y=y[seen_ptr:],color='red')
+    fig.savefig(args.model_path+'/scatter_r_vs_r_hat.png')
+    #imgcat(fig)
+    plt.close(fig)
+    """
+
+
 def reward_analysis(model_path):
     from argparse import Namespace
     with open(str(Path(model_path)/'args.txt')) as f:
@@ -165,70 +222,27 @@ def reward_analysis(model_path):
 
     sess.close()
 
-    def convert_range(x,minimum, maximum,a,b):
-        return (x - minimum)/(maximum - minimum) * (b - a) + a\
-
-    def draw(gt_returns, pred_returns, seen):
-        seen_ptr = np.max(np.where(seen))
-
-        gt_max,gt_min = max(gt_returns),min(gt_returns)
-        pred_max,pred_min = max(pred_returns),min(pred_returns)
-        max_observed = max(gt_returns[:seen_ptr])
-
-        # Draw P
-        fig,ax = plt.subplots()
-
-        ax.plot(gt_returns[:seen_ptr], [convert_range(p,pred_max,pred_min,gt_max,gt_min) for p in pred_returns[:seen_ptr]], 'o', color='red')
-        ax.plot(gt_returns[seen_ptr:], [convert_range(p,pred_max,pred_min,gt_max,gt_min) for p in pred_returns[seen_ptr:]], 'o', color='blue')
-        ax.plot([gt_min-5,gt_max+5],[gt_min-5,gt_max+5],'g--')
-        ax.plot([gt_min-5,max_observed],[gt_min-5,max_observed],'k-', linewidth=2)
-
-        ax.axis([gt_min-5,gt_max+5,gt_min-5,gt_max+5])
-        ax.set_xlabel("Ground Truth Returns")
-        ax.set_ylabel("Predicted Returns (normalized)")
-        fig.tight_layout()
-        fig.savefig(model_path+'/acc_r_vs_acc_r_hat.png',dpi=400)
-
-        plt.close(fig)
-
-    draw(*[np.array(e) for e in zip(*acc_r_pts)])
-
-    """
-    fig,ax = plt.subplots()
-    x,y,seen = (np.array(e) for e in zip(*rank_acc_r_pts))
-    seen_ptr = np.max(np.where(seen))
-    ax.scatter(x=x[:seen_ptr],y=y[:seen_ptr],color='blue')
-    ax.scatter(x=x[seen_ptr:],y=y[seen_ptr:],color='red')
-    fig.savefig(args.model_path+'/rank_vs_acc_r_hat.png')
-    #imgcat(fig)
-    plt.close(fig)
-
-    fig,ax = plt.subplots()
-    x,y,seen = (np.array(e) for e in zip(*acc_r_pts))
-    seen_ptr = np.max(np.where(seen))
-    ax.scatter(x=x[:seen_ptr],y=y[:seen_ptr],color='blue')
-    ax.scatter(x=x[seen_ptr:],y=y[seen_ptr:],color='red')
-    fig.savefig(args.model_path+'/acc_r_vs_acc_r_hat.png')
-    #imgcat(fig)
-    plt.close(fig)
-
-    fig,ax = plt.subplots()
-    x,y,seen = (np.array(e) for e in zip(*r_pts))
-    seen_ptr = np.max(np.where(seen))
-    ax.scatter(x=x[:seen_ptr],y=y[:seen_ptr],color='blue')
-    ax.scatter(x=x[seen_ptr:],y=y[seen_ptr:],color='red')
-    fig.savefig(args.model_path+'/scatter_r_vs_r_hat.png')
-    #imgcat(fig)
-    plt.close(fig)
-    """
+    draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(model_path,'acc_r_vs_acc_r_hat_scaled.png'))
+    draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(model_path,'acc_r_vs_acc_r_hat.png'),convert_range=False)
 
 
 if __name__ == "__main__":
     # Required Args (target envs & learners)
     parser = argparse.ArgumentParser(description=None)
-    parser.add_argument('--model_path', required=True)
+    parser.add_argument('--model_path', default='')
+    parser.add_argument('--draw_this_file', default='')
 
     args = parser.parse_args()
 
     #linear_model_analysis(args)
-    reward_analysis(args.model_path)
+    if args.model_path != '':
+        reward_analysis(args.model_path)
+    elif args.draw_this_file != '':
+        path = os.path.dirname(args.draw_this_file)
+
+        anal = np.load(args.draw_this_file)
+        rank_acc_r_pts=anal['rank_acc_r_pts']
+        acc_r_pts=anal['acc_r_pts']
+
+        draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(path,'acc_r_vs_acc_r_hat_scaled.png'))
+        draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(path,'acc_r_vs_acc_r_hat.png'),convert_range=False)
