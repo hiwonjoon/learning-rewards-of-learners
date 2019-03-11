@@ -7,24 +7,30 @@ import gym
 from siamese_ranker import PPO2Agent
 
 def gen_traj(env,agent,min_length):
-    obs, actions, rewards = [env.reset()], [], []
+    obs_list, actions_list, rewards_list = [], [], []
+
+    obs, actions, rewards = [env.reset()],[],[]
     while True:
         action = agent.act(obs[-1], None, None)
         ob, reward, done, _ = env.step(action)
+        final_x_pos = env.unwrapped.sim.data.qpos[0]
 
         obs.append(ob)
         actions.append(action)
         rewards.append(reward)
 
         if done:
-            if len(obs) < min_length:
-                obs.pop()
-                obs.append(env.reset())
+            obs_list.append(np.stack(obs,axis=0)[:-1])
+            actions_list.append(np.array(actions))
+            rewards_list.append(np.array(rewards))
+            print(final_x_pos)
+
+            if sum([len(obs) for obs in obs_list]) < min_length:
+                obs, actions, rewards = [env.reset()],[],[]
             else:
-                obs.pop()
                 break
 
-    return (np.stack(obs,axis=0), np.array(actions), np.array(rewards))
+    return obs_list, actions_list, rewards_list
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=None)
@@ -64,13 +70,16 @@ if __name__ == "__main__":
     rews_list  = []
     ep_rets = []
     for agent in train_agents:
+        print(agent.model_path)
         for _ in range(args.num_trajs):
-            obs,acs,rews = gen_traj(env,agent,args.min_length)
+            o,a,r = gen_traj(env,agent,args.min_length)
 
-            obs_list.append(obs)
-            acs_list.append(acs)
-            rews_list.append(rews)
-            ep_rets.append(np.sum(rews))
+            obs_list += o
+            acs_list += a
+            rews_list += r
+            ep_rets += [np.sum(r_traj) for r_traj in r]
+
+            print([np.sum(r_traj) for r_traj in r])
 
     import string
     filename = '%s_%s_%d.npz'%(args.env_id,args.train_chkpt,args.num_trajs)
