@@ -105,9 +105,11 @@ class AtariNet(Net):
         return tf.placeholder(tf.float32,[None]+self.in_dims,name=name)
 
     def build_reward(self,x):
+        x /= 255.0
         for layer in self.nets[:-1]:
             x = tf.nn.relu(layer(x))
         r = tf.squeeze(self.nets[-1](x),axis=1)
+        r = tf.tanh(r)
         return x, r
 
     def build_weight_decay(self):
@@ -458,6 +460,8 @@ class GTTrajLevelNoStepsDataset(GTTrajLevelDataset):
             f = np.load(os.path.join(logdir,'prebuilt.npz'))
             self.trajs = f['trajs']
             self.trajs_rank = f['trajs_rank']
+
+            print('%d Trajs are Loaded!'%(len(self.trajs)))
             return True
         else:
             return False
@@ -699,13 +703,17 @@ def train(args):
     else:
         assert False, 'specify prefernce type'
 
-    loaded = dataset.load_prebuilt(logdir)
+    if args.prebuilt != '':
+        loaded = dataset.load_prebuilt(args.prebuilt)
+    else:
+        loaded = False
 
     if loaded == False:
         # load demonstrator
         train_agents = [RandomAgent(env.action_space)] if args.random_agent else []
 
         train_chkpt = eval(args.train_chkpt)
+
         if type(train_chkpt) == int:
             train_chkpt = list(range(train_chkpt+1))
         else:
@@ -724,8 +732,8 @@ def train(args):
             if args.env_type == 'mujoco':
                 net = MujocoNet(args.include_action,ob_shape[-1],ac_dims,num_layers=args.num_layers,embedding_dims=args.embedding_dims)
             elif args.env_type == 'atari':
-                #net = AtariNet(ob_shape,embedding_dims=args.embedding_dims)
-                net = AtariNetV2(ob_shape,embedding_dims=args.embedding_dims)
+                net = AtariNet(ob_shape,embedding_dims=args.embedding_dims)
+                #net = AtariNetV2(ob_shape,embedding_dims=args.embedding_dims)
 
             model = Model(net,batch_size=64)
             models.append(model)
@@ -762,6 +770,7 @@ if __name__ == "__main__":
     parser.add_argument('--env_id', default='', help='Select the environment to run')
     parser.add_argument('--env_type', default='', help='mujoco or atari', choices=['mujoco','atari'])
     # Demonstrator Setting
+    parser.add_argument('--prebuilt', default='', help='paths to the directory where prebuilt traj ')
     parser.add_argument('--random_agent', action='store_true', help='whether to use default random agent')
     parser.add_argument('--learners_path', default='', help='path of learning agents')
     parser.add_argument('--train_chkpt', default='240', help='decide upto what learner stage you want to give')
@@ -829,7 +838,7 @@ if __name__ == "__main__":
 
         cmd = template.format(
             env=args.env_id,
-            nenv=ncpu//ngpu,
+            nenv=40, #%ncpu//ngpu,
             num_timesteps=args.num_timesteps,
             save_interval=args.save_interval,
             custom_reward=args.custom_reward,

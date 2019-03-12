@@ -83,16 +83,18 @@ def linear_model_analysis(args):
         input()
         plt.close(fig)
 
-def draw(gt_returns, pred_returns, seen, filepath, convert_range=True):
+def draw(gt_returns, pred_returns, seen, filepath, normalize=''):
     seen_ptr = np.max(np.where(seen))
 
     gt_max,gt_min = max(gt_returns),min(gt_returns)
     pred_max,pred_min = max(pred_returns),min(pred_returns)
     max_observed = max(gt_returns[:seen_ptr])
 
-    if convert_range:
+    if normalize == 'convert_range':
         convert_range = lambda x,minimum, maximum,a,b: (x - minimum)/(maximum - minimum) * (b - a) + a
         pred_returns = [convert_range(p,pred_max,pred_min,gt_max,gt_min) for p in pred_returns]
+    elif normalize == 'tanh':
+        pred_returns = [np.tanh(p) for p in pred_returns]
 
     # Draw P
     fig,ax = plt.subplots()
@@ -167,8 +169,8 @@ def reward_analysis(model_path):
             if args.env_type == 'mujoco':
                 net = MujocoNet(args.include_action,ob_shape[-1],ac_dims,num_layers=args.num_layers,embedding_dims=args.embedding_dims)
             elif args.env_type == 'atari':
-                #net = AtariNet(ob_shape,embedding_dims=args.embedding_dims)
-                net = AtariNetV2(ob_shape,embedding_dims=args.embedding_dims)
+                net = AtariNet(ob_shape,embedding_dims=args.embedding_dims)
+                #net = AtariNetV2(ob_shape,embedding_dims=args.embedding_dims)
 
             model = Model(net,batch_size=1)
             model.saver.restore(sess,os.path.join(model_path,'model_%d.ckpt'%i))
@@ -222,8 +224,9 @@ def reward_analysis(model_path):
 
     sess.close()
 
-    draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(model_path,'acc_r_vs_acc_r_hat_scaled.png'))
-    draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(model_path,'acc_r_vs_acc_r_hat.png'),convert_range=False)
+    draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(model_path,'acc_r_vs_acc_r_hat_scaled.png'),normalize='convert_range')
+    draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(model_path,'acc_r_vs_acc_r_hat_tanh.png'),normalize='tanh')
+    draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(model_path,'acc_r_vs_acc_r_hat.png'))
 
 
 if __name__ == "__main__":
@@ -244,5 +247,6 @@ if __name__ == "__main__":
         rank_acc_r_pts=anal['rank_acc_r_pts']
         acc_r_pts=anal['acc_r_pts']
 
-        draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(path,'acc_r_vs_acc_r_hat_scaled.png'))
-        draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(path,'acc_r_vs_acc_r_hat.png'),convert_range=False)
+        draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(path,'acc_r_vs_acc_r_hat_scaled.png'),normalize='convert_range')
+        draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(path,'acc_r_vs_acc_r_hat_tanh.png'),normalize='tanh')
+        draw(*[np.array(e) for e in zip(*acc_r_pts)],filepath=os.path.join(path,'acc_r_vs_acc_r_hat.png'))
