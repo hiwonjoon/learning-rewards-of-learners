@@ -3,4 +3,4 @@
 	url = https://github.com/hiwonjoon/baselines.git
 [submodule "estool"]
 	path = estool
-	url = git@github.com:hiwonjoon/estool.git
+	url = https://github.com/hiwonjoon/estool.git
